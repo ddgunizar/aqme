@@ -79,7 +79,9 @@ from aqme.utils import (
     read_xyz_charge_mult,
     mol_from_sdf_or_mol_or_mol2,
     add_prefix_suffix,
-    check_files
+    check_files,
+    check_dependencies,
+    set_destination
 )
 
 from aqme.csearch.crest import xyzall_2_xyz
@@ -98,6 +100,9 @@ class qprep:
         start_time_overall = time.time()
         # load default and user-specified variables
         self.args = load_variables(kwargs, "qprep", create_dat=create_dat)
+
+        # check whether dependencies are installed
+        _ = check_dependencies(self)
 
         # retrieves the different files to run in QPREP
         _ = check_files(self,'qprep')
@@ -119,12 +124,7 @@ class qprep:
             self.args.log.finalize()
             sys.exit()
 
-        if self.args.destination is None:
-            destination = self.args.initial_dir.joinpath("QCALC")
-        elif self.args.initial_dir.joinpath(self.args.destination).exists():
-            destination = Path(self.args.initial_dir.joinpath(self.args.destination))
-        else:
-            destination = Path(self.args.destination)
+        destination = set_destination(self,'QCALC')
 
         # check if qm_input is not empty
         if self.args.qm_input == "" and create_dat:

@@ -510,7 +510,7 @@ def read_wbo(file,self):
 
     return bonds, wbos
 
-def calculate_global_CDFT_descriptors_part(file, file_Nminus1, file_Nminus2, file_Nplus1, file_Nplus2,self):
+def calculate_global_CDFT_descriptors(file, file_Nminus1, file_Nminus2, file_Nplus1, file_Nplus2,self):
     """
     Read .gfn1 output file created from xTB and calculate CDFT descriptors with FDA approximations part 2
     """

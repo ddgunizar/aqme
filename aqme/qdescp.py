@@ -110,7 +110,7 @@ from aqme.qdescp_utils import (
     read_wbo,
     read_gfn1,
     calculate_local_CDFT_descriptors,
-    calculate_global_CDFT_descriptors_part,
+    calculate_global_CDFT_descriptors,
     calculate_global_morfeus_descriptors,
     calculate_local_morfeus_descriptors,
     get_descriptors,
@@ -669,7 +669,6 @@ class qdescp:
         xtb_files_props['xtb_json'] = str(dat_dir) + "/{0}.json".format(name)
         xtb_files_props['xtb_wbo'] = str(dat_dir) + "/{0}.wbo".format(name)
         xtb_files_props['xtb_gfn1'] = str(dat_dir) + "/{0}.gfn1".format(name)
-        xtb_files_props['xtb_gfn1'] = str(dat_dir) + "/{0}.gfn1".format(name)
         xtb_files_props['xtb_Nminus1'] = str(dat_dir) + "/{0}.Nminus1".format(name)
         xtb_files_props['xtb_Nminus2'] = str(dat_dir) + "/{0}.Nminus2".format(name)
         xtb_files_props['xtb_Nplus1'] = str(dat_dir) + "/{0}.Nplus1".format(name)
@@ -943,7 +942,7 @@ class qdescp:
         properties_FOD = read_fod(xtb_files_props['xtb_fod'],self)
         bonds, wbos = read_wbo(xtb_files_props['xtb_wbo'],self)
         properties_solv = read_solv(xtb_files_props['xtb_solv'])
-        cdft_descriptors  = calculate_global_CDFT_descriptors_part( xtb_files_props['xtb_out'], xtb_files_props['xtb_Nminus1'], xtb_files_props['xtb_Nminus2'], xtb_files_props['xtb_Nplus1'], xtb_files_props['xtb_Nplus2'],self)
+        cdft_descriptors  = calculate_global_CDFT_descriptors( xtb_files_props['xtb_out'], xtb_files_props['xtb_Nminus1'], xtb_files_props['xtb_Nminus2'], xtb_files_props['xtb_Nplus1'], xtb_files_props['xtb_Nplus2'],self)
         localDescriptors = calculate_local_CDFT_descriptors(xtb_files_props['xtb_fukui'], cdft_descriptors,self)
         # create matrix of Wiberg bond-orders
         atoms = properties_dict.get("atoms")

@@ -90,7 +90,7 @@ def get_boltz_props(json_files, name, boltz_dir, calc_type, self, mol_props, ato
     avg_json_data = {}
     denovo_json_data = {}
     interpret_json_data = {}
-    atomic_props = True
+    atomic_props = False
 
     # Get weighted atomic properties
     for i, prop in enumerate(atom_props):
@@ -98,14 +98,16 @@ def get_boltz_props(json_files, name, boltz_dir, calc_type, self, mol_props, ato
             for json_file in json_files:
                 json_data = read_json(json_file)
                 for atom_prop in atom_props:
-                    if atom_prop not in json_data:
-                        atomic_props = False
+                    if atom_prop in json_data:
+                        atomic_props = True
+                        break
         if atomic_props:
             try:
                 prop_list = [read_json(json_file)[prop] for json_file in json_files]
                 avg_prop = average_properties(boltz, prop_list)
             except KeyError:
                 avg_json_data[prop] = np.nan
+            
         else:
             avg_prop = np.nan
         update_avg_json_data(avg_json_data, prop, avg_prop, smarts_targets)
@@ -122,63 +124,32 @@ def get_boltz_props(json_files, name, boltz_dir, calc_type, self, mol_props, ato
     # Get denovo atomic properties
     for i, prop in enumerate(denovo_atoms):
         if atomic_props:
-            try:
-                prop_list = [read_json(json_file)[prop] for json_file in json_files]
-                avg_prop = average_properties(boltz, prop_list)
-            except KeyError:
-                avg_json_data[prop] = np.nan
-        else:
-            avg_prop = np.nan
-        update_avg_json_data(denovo_json_data, prop, avg_prop, smarts_targets)
+            denovo_json_data[prop] = avg_json_data[prop]
 
     # Get denovo molecular properties
     for prop in denovo_mols:
-        try:
-            prop_list = [read_json(json_file)[prop] for json_file in json_files]
-            avg_prop = average_properties(boltz, prop_list, is_atom_prop=False)
-            denovo_json_data[prop] = avg_prop
-        except KeyError:
-            avg_json_data[prop] = np.nan
+        denovo_json_data[prop] = avg_json_data[prop]
 
     # Get interpret atomic properties
     for i, prop in enumerate(interpret_atoms):
         if atomic_props:
-            try:
-                prop_list = [read_json(json_file)[prop] for json_file in json_files]
-                avg_prop = average_properties(boltz, prop_list)
-            except KeyError:
-                avg_json_data[prop] = np.nan
-
-        else:
-            avg_prop = np.nan
-        update_avg_json_data(interpret_json_data, prop, avg_prop, smarts_targets)
+            interpret_json_data[prop] = avg_json_data[prop]
 
     # Get interpret molecular properties
     for prop in interpret_mols:
-        try:
-            prop_list = [read_json(json_file)[prop] for json_file in json_files]
-            avg_prop = average_properties(boltz, prop_list, is_atom_prop=False)
-            interpret_json_data[prop] = avg_prop
-        except KeyError:
-            avg_json_data[prop] = np.nan
+        interpret_json_data[prop] = avg_json_data[prop]
 
     # Calculate RDKit descriptors if molecule is provided
     if mol is not None:
         # Calculate all RDKit properties for avg_json_data
-        avg_json_data,_,_ = get_rdkit_properties(self,avg_json_data, mol)
+        avg_json_data = get_rdkit_properties(self,avg_json_data, mol)
         
-        # Calculate selected RDKit properties for denovo_json_data
-        _,denovo_rdkit_json_data,_ = get_rdkit_properties(self,{}, mol)
-        
-        # Merge selected RDKit properties with denovo_json_data
-        denovo_json_data.update(denovo_rdkit_json_data)
+        # Get selected RDKit properties for denovo_json_data
+        denovo_json_data["MolLogP"] = avg_json_data["MolLogP"]
 
-        # Calculate selected RDKit properties for interpret_json_data
-        _,_,interpret_rdkit_json_data = get_rdkit_properties(self,{}, mol)
-        
-        # Merge selected RDKit properties with interpret_json_data
-        interpret_json_data.update(interpret_rdkit_json_data)
-    
+        # Get selected RDKit properties with interpret_json_data
+        interpret_json_data["MolLogP"] = avg_json_data["MolLogP"]
+
     convert_ndarrays(avg_json_data)
     convert_ndarrays(denovo_json_data)
     convert_ndarrays(interpret_json_data)
@@ -369,12 +340,12 @@ def average_prop_atom_nmr(weights, prop):
 
     boltz_avg = []
     for i, p in enumerate(prop):
-        if p == 'NaN':
-            boltz_avg = 'NaN'
+        if str(p).lower() == 'nan' or p is None:
+            boltz_avg = np.nan
             break
         boltz_avg.append([number * weights[i] for number in p])
-    if boltz_avg == 'NaN':
-        boltz_res = 'NaN'
+    if str(p).lower() == 'nan':
+        boltz_res = np.nan
     else:
         boltz_res = np.sum(boltz_avg, 0)
     return boltz_res
@@ -397,14 +368,14 @@ def average_prop_mol(weights, prop):
     # Loop through each property and its corresponding weight
     for i, p in enumerate(prop):
         # If the property is 'NaN', break the loop and return 'NaN'
-        if p == 'NaN':
-            boltz_avg = 'NaN'
+        if str(p).lower() == 'nan' or p is None:
+            boltz_avg = np.nan
             break
         # Otherwise, calculate the weighted sum of properties
         boltz_avg += p * weights[i]
     
     # If the result is a valid number, round it to 4 decimal places
-    if boltz_avg != 'NaN':
+    if str(boltz_avg).lower() != 'nan':
         boltz_avg = round(boltz_avg, 4)
 
     # Return the Boltzmann-weighted average, rounded to 4 decimal places (or 'NaN' if encountered)
@@ -415,35 +386,20 @@ def get_rdkit_properties(self,avg_json_data, mol):
     Calculates RDKit molecular descriptors
     """
 
-    #Level: denovo descriptors
-    denovo_json_data = {}
-    #Level: interpret descriptors
-    interpret_json_data = {}
-
     try:
         #level: full
         descrs = Descriptors.CalcMolDescriptors(mol)
         for descr in descrs:
             if descrs[descr] != np.nan and str(descrs[descr]).lower() != 'nan':
                 avg_json_data[descr] = descrs[descr]
-        
-        # descriptors for the level_ denovo
-        denovo_json_data["MolLogP"] = descrs.get("MolLogP", None)
-        # descriptors for the level: interpret
-        interpret_json_data["MolLogP"] = descrs.get("MolLogP", None)
 
     # For older versions of RDKit 
     except AttributeError:
         self.args.log.write(f"x  WARNING! Install a newer version of RDKit to get all the RDKit descriptors in the databse with all the descriptors. You can use: 'pip install rdkit --upgrade'.")
         avg_json_data["MolLogP"] = rdkit.Chem.Descriptors.MolLogP(mol)
 
-        # descriptors for the level_ denovo
-        denovo_json_data["MolLogP"] = avg_json_data["MolLogP"]
-        # descriptors for the level: interpret
-        interpret_json_data["MolLogP"] = avg_json_data["MolLogP"]
+    return avg_json_data
 
-
-    return avg_json_data, denovo_json_data, interpret_json_data
 
 def read_gfn1(file,self):
     """
@@ -506,8 +462,8 @@ def read_gfn1(file,self):
         try:
             item = line.split()
             # Extract and round the required values from each line
-            q_mull = round(float(item[-5]), 5)
-            q_cm5 = round(float(item[-4]), 5)
+            q_mull = round(float(item[-5]), 3)
+            q_cm5 = round(float(item[-4]), 3)
             s_prop_ind = round(float(item[-3]), 3)
             p_prop_ind = round(float(item[-2]), 3)
             d_prop_ind = round(float(item[-1]), 3)
@@ -523,8 +479,8 @@ def read_gfn1(file,self):
 
     # Store the parsed data in a dictionary and return it
     localgfn1 = {
-        "mulliken charges": mulliken,
-        "cm5 charges": cm5,
+        "mulliken charge": mulliken,
+        "cm5 charge": cm5,
         "s proportion": s_prop,
         "p proportion": p_prop,
         "d proportion": d_prop,
@@ -554,82 +510,7 @@ def read_wbo(file,self):
 
     return bonds, wbos
 
-
-def calculate_global_CDFT_descriptors(file,self):
-    """
-    Read .gfn1 output file created from xTB and calculate CDFT descriptors with FDA approximations part 1.
-    """
-
-    # Check if the file exists
-    if not os.path.exists(file):
-        self.args.log.write(f"x  WARNING! The file {file} does not exist.")
-        return None
-
-    with open(file, "r") as f:
-        data = f.readlines()
-        
-    # Initialize variables
-    delta_SCC_IP, delta_SCC_EA, electrophilicity_index = None, None, None
-    chemical_hardness, chemical_softness = None, None
-    chemical_potential, mulliken_electronegativity = None, None
-    electrodonating_power_index, electroaccepting_power_index = None, None
-    intrinsic_reactivity_index = None
-    electrofugality, nucleofugality, nucleophilicity_index, net_electrophilicity = None, None, None, None
-
-    # Extract relevant values from the file
-    for line in data:
-        if "delta SCC IP (eV):" in line:
-            delta_SCC_IP = float(line.split()[-1])
-        elif "delta SCC EA (eV):" in line:
-            delta_SCC_EA = float(line.split()[-1])
-        elif "Global electrophilicity index (eV):" in line:
-            electrophilicity_index = float(line.split()[-1])
-
-    # Check if required descriptors were found
-    if delta_SCC_IP is not None and delta_SCC_EA is not None and electrophilicity_index is not None:
-        # Calculate CDFT descriptors
-        chemical_hardness = round((delta_SCC_IP - delta_SCC_EA), 4)
-        chemical_potential = round(-(delta_SCC_IP + delta_SCC_EA) / 2, 4)
-        mulliken_electronegativity = round(-chemical_potential, 4)
-        electrofugality = round(-delta_SCC_EA + electrophilicity_index, 4)
-        nucleofugality = round(delta_SCC_IP + electrophilicity_index, 4)
-
-        if chemical_hardness != 0:
-            chemical_softness = round(1 / chemical_hardness, 4)
-            electrodonating_power_index = round(((delta_SCC_IP + 3 * delta_SCC_EA)**2) / (8 * chemical_hardness), 4)
-            electroaccepting_power_index = round(((3 * delta_SCC_IP + delta_SCC_EA)**2) / (8 * chemical_hardness), 4)
-            intrinsic_reactivity_index = round((delta_SCC_IP + delta_SCC_EA) / chemical_hardness, 4)
-
-            if electroaccepting_power_index != 0:
-                nucleophilicity_index = round(10 / electroaccepting_power_index, 4)
-
-        net_electrophilicity = round((electrodonating_power_index - electroaccepting_power_index), 4)
-
-    else:
-        self.args.log.write(f"x  WARNING! delta_SCC_IP, delta_SCC_EA, or electrophilicity_index were not found in the file. Global Conceptual DFT descriptors cannot be fully calculated.")
-
-    # Collect descriptors into a dictionary
-    cdft_descriptors = {
-        "IP": delta_SCC_IP,
-        "EA": delta_SCC_EA,
-        "Electrophil. idx": electrophilicity_index,
-        "Hardness": chemical_hardness,
-        "Softness": chemical_softness,
-        "Chem. potential": chemical_potential,
-        "Electronegativity": mulliken_electronegativity,
-        "Electrodon. power idx": electrodonating_power_index,
-        "Electroaccep. power idx": electroaccepting_power_index,
-        "Nucleophilicity idx": nucleophilicity_index,
-        "Electrofugality": electrofugality,
-        "Nucleofugality": nucleofugality,
-        "Intrinsic React. idx": intrinsic_reactivity_index,
-        "Net Electrophilicity": net_electrophilicity
-    }
-
-    return cdft_descriptors
-
-
-def calculate_global_CDFT_descriptors_part2(file, file_Nminus1, file_Nminus2, file_Nplus1, file_Nplus2, cdft_descriptors,self):
+def calculate_global_CDFT_descriptors_part(file, file_Nminus1, file_Nminus2, file_Nplus1, file_Nplus2,self):
     """
     Read .gfn1 output file created from xTB and calculate CDFT descriptors with FDA approximations part 2
     """
@@ -680,33 +561,46 @@ def calculate_global_CDFT_descriptors_part2(file, file_Nminus1, file_Nminus2, fi
     scc_energy_Nplus1 *= Hartree
     scc_energy_Nplus2 *= Hartree
 
-    # Extract required CDFT descriptors
-    delta_SCC_IP = cdft_descriptors.get("IP")
-    delta_SCC_EA = cdft_descriptors.get("EA")
-    chemical_hardness = cdft_descriptors.get("Hardness")
-
-    if None in [delta_SCC_IP, delta_SCC_EA, chemical_hardness]:
-        self.args.log.write("x  WARNING! Missing required CDFT descriptors (IP, EA, or Hardness).")
-        return None
-
     # Initialize variables
+    delta_SCC_IP, delta_SCC_EA, electrophilicity_index = None, None, None
+    chemical_hardness, chemical_softness = None, None
+    chemical_potential, mulliken_electronegativity = None, None
+    electrodonating_power_index, electroaccepting_power_index = None, None
+    intrinsic_reactivity_index = None
+    electrofugality, nucleofugality, nucleophilicity_index, net_electrophilicity = None, None, None, None
     Vertical_second_IP, Vertical_second_EA = None, None
     hyper_hardness, Global_hypersoftness = None, None
     Electrophilic_descriptor, w_cubic = None, None
 
-    # Calculations if all SCC energies and descriptors are available:
-    # Calculating the following descriptors
-        # 1) Second IP
+    # Calculate Global CDFT descriptors
+    delta_SCC_IP = round(((scc_energy_Nminus1 - corr_xtb) - scc_energy),4)
+    delta_SCC_EA = round((scc_energy - (scc_energy_Nplus1 + corr_xtb)),4)
+    chemical_hardness = round((delta_SCC_IP - delta_SCC_EA), 4)
+    chemical_potential = round(-(delta_SCC_IP + delta_SCC_EA) / 2, 4)
+    electrophilicity_index = (chemical_potential**2)/(2*chemical_hardness)
+    mulliken_electronegativity = round(-chemical_potential, 4)
+    electrofugality = round(-delta_SCC_EA + electrophilicity_index, 4)
+    nucleofugality = round(delta_SCC_IP + electrophilicity_index, 4)
+    electrodonating_maximum_electron_flow = round((-(chemical_potential/chemical_hardness)),4)
+    electrodonating_chemical_potential = round(((1/4)*((-3*delta_SCC_IP) - delta_SCC_EA)),4)
+    lectrodonating_maximum_electron_flow = round((-(electrodonating_chemical_potential/chemical_hardness)),4)
     Vertical_second_IP = round((((scc_energy_Nminus2 - scc_energy_Nminus1) - corr_xtb)), 4)
-        # 2) Second EA
     Vertical_second_EA = round((((scc_energy_Nplus1 - scc_energy_Nplus2) + corr_xtb)), 4)
-        # 3) Hyperhardnes
     hyper_hardness = round((-((0.5) * (delta_SCC_IP + delta_SCC_EA - Vertical_second_IP - Vertical_second_EA))), 4)
 
     if chemical_hardness != 0:
+        chemical_softness = round(1 / chemical_hardness, 4)
+        electrodonating_power_index = round(((delta_SCC_IP + 3 * delta_SCC_EA)**2) / (8 * chemical_hardness), 4)
+        electroaccepting_power_index = round(((3 * delta_SCC_IP + delta_SCC_EA)**2) / (8 * chemical_hardness), 4)
+        intrinsic_reactivity_index = round((delta_SCC_IP + delta_SCC_EA) / chemical_hardness, 4)
         Global_hypersoftness = round((hyper_hardness / ((chemical_hardness) ** 3)), 4)
 
-        # 4) Electrophilic descriptor calculations
+        if electroaccepting_power_index != 0:
+            nucleophilicity_index = round(10 / electroaccepting_power_index, 4)
+
+    net_electrophilicity = round((electrodonating_power_index - electroaccepting_power_index), 4)
+
+        # For lectrophilic descriptor calculations
     A = ((scc_energy_Nplus1 - scc_energy) + corr_xtb)
     c = (Vertical_second_IP - (2 * delta_SCC_IP) + A) / ((2 * Vertical_second_IP) - delta_SCC_IP - A)
     a = -((delta_SCC_IP + A) / 2) + (((delta_SCC_IP - A) / 2) * c)
@@ -724,7 +618,7 @@ def calculate_global_CDFT_descriptors_part2(file, file_Nminus1, file_Nminus2, fi
         Phi = inter_phi - Eta
         Electrophilic_descriptor = round(((chi * (Phi / Gamma)) - (((Phi / Gamma) ** 2) * ((Eta / 2) + (Phi / 6)))), 4)
 
-        # 5) Cubic electrophilicity index
+        # For cubic electrophilicity index
     Gamma_cubic = 2 * delta_SCC_IP - Vertical_second_IP - delta_SCC_EA
     Eta_cubic = delta_SCC_IP - delta_SCC_EA
 
@@ -735,18 +629,35 @@ def calculate_global_CDFT_descriptors_part2(file, file_Nminus1, file_Nminus2, fi
         self.args.log.write(f"x  WARNING! Eta_cubic is zero, skipping cub. electrophilicity idx calculation.")
 
     # Return the calculated descriptors
-    cdft_descriptors2 = {
+    cdft_descriptors = {
+        "IP": delta_SCC_IP,
+        "EA": delta_SCC_EA,
+        "Electrophil. idx": electrophilicity_index,
+        "Hardness": chemical_hardness,
+        "Softness": chemical_softness,
+        "Chem. potential": chemical_potential,
+        "Electronegativity": mulliken_electronegativity,
+        "Electrodon. power idx": electrodonating_power_index,
+        "Electroaccep. power idx": electroaccepting_power_index,
+        "Nucleophilicity idx": nucleophilicity_index,
+        "Electrofugality": electrofugality,
+        "Nucleofugality": nucleofugality,
+        "Intrinsic React. idx": intrinsic_reactivity_index,
+        "Net Electrophilicity": net_electrophilicity,
         "Second IP": Vertical_second_IP,
         "Second EA": Vertical_second_EA,
         "Hyperhardness": hyper_hardness,
         "Hypersoftness": Global_hypersoftness,
         "Electrophilic descrip.": Electrophilic_descriptor,
-        "cub. electrophilicity idx": w_cubic
+        "cub. electrophilicity idx": w_cubic,
+        "max. electron flow": electrodonating_maximum_electron_flow,
+        "Electrodon. Chem. potential": electrodonating_chemical_potential,
+        "Electrodon. max. electron flow": lectrodonating_maximum_electron_flow
     }
 
-    return cdft_descriptors2
+    return cdft_descriptors
 
-def calculate_local_CDFT_descriptors(file_fukui, cdft_descriptors, cdft_descriptors2,self):
+def calculate_local_CDFT_descriptors(file_fukui, cdft_descriptors,self):
     """
     Read fukui output file created from XTB and calculate local CDFT descriptors.
     """
@@ -782,12 +693,12 @@ def calculate_local_CDFT_descriptors(file_fukui, cdft_descriptors, cdft_descript
         self.args.log.write("WARNING: Fukui data lists are empty. Please check the '.fukui' file.")
         return None
 
-    if None in [cdft_descriptors, cdft_descriptors2]:
+    if None in [cdft_descriptors]:
         self.args.log.write("x  WARNING! Missing required CDFT descriptors (Softness, Hypersoftness, Electrophil. idx or Nucleophilicity idx).")
         return None
 
     chemical_softness = cdft_descriptors.get("Softness")
-    Global_hypersoftness = cdft_descriptors2.get("Hypersoftness")
+    Global_hypersoftness = cdft_descriptors.get("Hypersoftness")
     electrophilicity_index = cdft_descriptors.get("Electrophil. idx")
     nucleophilicity_index = cdft_descriptors.get("Nucleophilicity idx")
 
@@ -911,7 +822,7 @@ def read_xtb(file,self):
         numbers.append(int(item[0]))
         atoms.append(item[2])
         covCN.append(float(item[3]))
-        chrgs.append(float(item[4]))
+        chrgs.append(round(float(item[4]),3))
         C6AA.append(float(item[5]))
         alpha.append(float(item[6]))
 
@@ -923,7 +834,7 @@ def read_xtb(file,self):
         "LUMO": lumo,
         "atoms": atoms,
         "numbers": numbers,
-        "charges": chrgs, 
+        "Partial charge": chrgs, 
         "Dipole module": dipole_module,
         "Fermi-level": Fermi_level,
         "Trans. dipole moment": transition_dipole_moment,
@@ -1245,6 +1156,11 @@ def calculate_local_morfeus_descriptors(final_xyz_path,self):
         "Dispersion": local_disp
     }
 
+    # for properties that failed in all calculations
+    for prop in local_properties_morfeus:
+        if local_properties_morfeus[prop] == []:
+            local_properties_morfeus[prop] = [None]*len(local_properties_morfeus["Buried volume"])
+
     return local_properties_morfeus
 
 
@@ -1255,7 +1171,7 @@ def get_descriptors(level):
     descriptors = {
         'denovo': {
             'mol': ["HOMO-LUMO gap", "HOMO", "LUMO", "IP", "EA", "Dipole module", "Total charge", "Global SASA", "G solv. in H2O", "G of H-bonds H2O"],
-            'atoms': ["cm5 charges", "Electrophil.", "Nucleophil.", "Radical attack", "SASA", "Buried volume", "Cone angle", "H bond H2O"]
+            'atoms': ["Partial charge", "Electrophil.", "Nucleophil.", "Radical attack", "SASA", "Buried volume", "Cone angle", "H bond H2O"]
         },
         'interpret': {
             'mol': ["Fermi-level", "Total polariz. alpha", "Total FOD", "Electrophil. idx", "Hardness", "Softness", "Electronegativity",
@@ -1266,8 +1182,8 @@ def get_descriptors(level):
                       "Solid angle", "Pyramidaliz. P", "Pyramidaliz. Vol", "Dispersion"]
         },
         'full': {
-            'mol': ["Total energy", "Total disp. C6", "Total disp. C8", "Chem. potential", "Electrodon. power idx",
-                    "Electroaccep. power idx", 
+            'mol': ["Total energy", "Total disp. C6", "Total disp. C8", "Chem. potential", 
+                    "Electrodon. power idx", "Electroaccep. power idx", "max. electron flow", "Electrodon. Chem. potential", "Electrodon. max. electron flow",
                     "Electrofugality", "Nucleofugality", "Intrinsic React. idx", "Net Electrophilicity", 
                     "Hyperhardness", "Hypersoftness", "Electrophilic descrip.", "cub. electrophilicity idx",
                     "G solv. elec.", "G solv. SASA", "G solv. shift"],

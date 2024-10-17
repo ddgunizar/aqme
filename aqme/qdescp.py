@@ -99,7 +99,8 @@ from aqme.utils import (
     run_command,
     check_files,
     check_dependencies,
-    set_destination
+    set_destination,
+    periodic_table
 )
 from aqme.qdescp_utils import (
     get_boltz_props,
@@ -109,8 +110,7 @@ from aqme.qdescp_utils import (
     read_wbo,
     read_gfn1,
     calculate_local_CDFT_descriptors,
-    calculate_global_CDFT_descriptors,
-    calculate_global_CDFT_descriptors_part2,
+    calculate_global_CDFT_descriptors_part,
     calculate_global_morfeus_descriptors,
     calculate_local_morfeus_descriptors,
     get_descriptors,
@@ -507,7 +507,6 @@ class qdescp:
                 name_indiv = ['_'.join(name_indiv)]
             data.insert(loc=0, column='code_name', value=name_indiv)
             dfs.append(data)
-
         temp = pd.concat(dfs, ignore_index=True)
 
         # first, create raw files that will store all the information, including atomic descriptors in lists
@@ -597,9 +596,7 @@ class qdescp:
                 _, charges, _, _ = mol_from_sdf_or_mol_or_mol2(file, "csearch", self.args)
             else:
                 charges = [self.args.charge] * len(
-                    glob.glob(
-                        f"{os.path.dirname(os.path.abspath(file))}/{name}_conf_*.xyz"
-                    )
+                    glob.glob(f"{os.path.dirname(os.path.abspath(file))}/{name}_conf_*.xyz")
                 )
             if self.args.mult is None:
                 _, _, mults, _ = mol_from_sdf_or_mol_or_mol2(file, "csearch", self.args)
@@ -696,15 +693,13 @@ class qdescp:
                 str(self.args.qdescp_opt),
                 "--acc",
                 str(self.args.qdescp_acc),
-                "--gfn",
-                "2",
                 "--chrg",
                 str(charge),
                 "--uhf",
                 str(int(mult) - 1),
                 "-P",
                 "1",
-            ]
+            ] # optimization
             if self.args.qdescp_solvent is not None:
                 command_opt.append("--alpb")
                 command_opt.append(f"{self.args.qdescp_solvent}")
@@ -724,7 +719,6 @@ class qdescp:
 
             if xtb_passing:
                 final_xyz_path = xtb_files_props['xtb_xyz_path']
-                self.final_xyz_path = final_xyz_path
                 with open(final_xyz_path, "r") as xyz_file:
                     self.xyz_coordinates = xyz_file.readlines()
 
@@ -732,12 +726,8 @@ class qdescp:
             command1 = [
                 "xtb",
                 xtb_files_props['xtb_xyz_path'],
-                "--pop",
-                "--wbo",
                 "--acc",
                 str(self.args.qdescp_acc),
-                "--gfn",
-                "2",
                 "--chrg",
                 str(charge),
                 "--uhf",
@@ -748,7 +738,7 @@ class qdescp:
                 str(xtb_input_file),
                 "-P",
                 "1",
-            ]
+            ] #Single point (file_N)
             if self.args.qdescp_solvent is not None:
                 command1.append("--alpb")
                 command1.append(f"{self.args.qdescp_solvent}")
@@ -786,7 +776,7 @@ class qdescp:
                 "--vomega",
                 "-P",
                 "1",
-            ]
+            ] #For cm5 chargues and proportions (localgfn1)
             if self.args.qdescp_solvent is not None:
                 command2.append("--alpb")
                 command2.append(f"{self.args.qdescp_solvent}")
@@ -798,8 +788,6 @@ class qdescp:
                 "xtb",
                 xtb_files_props['xtb_xyz_path'],
                 "--vfukui",
-                "--gfn",
-                "2",
                 "--chrg",
                 str(charge),
                 "--acc",
@@ -810,7 +798,7 @@ class qdescp:
                 str(self.args.qdescp_temp),
                 "-P",
                 "1",
-            ]
+            ] #For fukuis
             if self.args.qdescp_solvent is not None:
                 command3.append("--alpb")
                 command3.append(f"{self.args.qdescp_solvent}")
@@ -821,8 +809,6 @@ class qdescp:
                 "xtb",
                 xtb_files_props['xtb_xyz_path'],
                 "--fod",
-                "--gfn",
-                "2",
                 "--chrg",
                 str(charge),
                 "--acc",
@@ -833,7 +819,7 @@ class qdescp:
                 str(self.args.qdescp_temp),
                 "-P",
                 "1",
-            ]
+            ] # for FOD
             if self.args.qdescp_solvent is not None:
                 command4.append("--alpb")
                 command4.append(f"{self.args.qdescp_solvent}")
@@ -843,8 +829,6 @@ class qdescp:
             command5 = [
                 "xtb",
                 xtb_files_props['xtb_xyz_path'],
-                "--gfn",
-                "1",
                 "--chrg",
                 str(int(charge) +1),
                 "--acc",
@@ -855,7 +839,7 @@ class qdescp:
                 str(self.args.qdescp_temp),
                 "-P",
                 "1",
-            ]
+            ] #file_Nminus1 (N-1)
             if self.args.qdescp_solvent is not None:
                 command5.append("--alpb")
                 command5.append(f"{self.args.qdescp_solvent}")
@@ -865,8 +849,6 @@ class qdescp:
             command6 = [
                 "xtb",
                 xtb_files_props['xtb_xyz_path'],
-                "--gfn",
-                "1",
                 "--chrg",
                 str(int(charge) +2),
                 "--acc",
@@ -877,7 +859,7 @@ class qdescp:
                 str(self.args.qdescp_temp),
                 "-P",
                 "1",
-            ]
+            ] #file_N-2 (N-2)
             if self.args.qdescp_solvent is not None:
                 command6.append("--alpb")
                 command6.append(f"{self.args.qdescp_solvent}")
@@ -887,8 +869,6 @@ class qdescp:
             command7 = [
                 "xtb",
                 xtb_files_props['xtb_xyz_path'],
-                "--gfn",
-                "1",
                 "--chrg",
                 str(int(charge) -1),
                 "--acc",
@@ -899,7 +879,7 @@ class qdescp:
                 str(self.args.qdescp_temp),
                 "-P",
                 "1",
-            ]
+            ] #file_Nplus1 (N+1)
             if self.args.qdescp_solvent is not None:
                 command7.append("--alpb")
                 command7.append(f"{self.args.qdescp_solvent}")
@@ -909,8 +889,6 @@ class qdescp:
             command8 = [
                 "xtb",
                 xtb_files_props['xtb_xyz_path'],
-                "--gfn",
-                "1",
                 "--chrg",
                 str(int(charge)-2),
                 "--acc",
@@ -921,7 +899,7 @@ class qdescp:
                 str(self.args.qdescp_temp),
                 "-P",
                 "1",
-            ]
+            ] #file_Nplus2 (N+2)
             if self.args.qdescp_solvent is not None:
                 command8.append("--alpb")
                 command8.append(f"{self.args.qdescp_solvent}")
@@ -937,8 +915,6 @@ class qdescp:
                 xtb_files_props['xtb_xyz_path'],
                 "--acc",
                 str(self.args.qdescp_acc),
-                "--gfn",
-                "2",
                 "--chrg",
                 str(charge),
                 "--uhf",
@@ -967,9 +943,8 @@ class qdescp:
         properties_FOD = read_fod(xtb_files_props['xtb_fod'],self)
         bonds, wbos = read_wbo(xtb_files_props['xtb_wbo'],self)
         properties_solv = read_solv(xtb_files_props['xtb_solv'])
-        cdft_descriptors = calculate_global_CDFT_descriptors(xtb_files_props['xtb_gfn1'],self)
-        cdft_descriptors2  = calculate_global_CDFT_descriptors_part2( xtb_files_props['xtb_gfn1'], xtb_files_props['xtb_Nminus1'], xtb_files_props['xtb_Nminus2'], xtb_files_props['xtb_Nplus1'], xtb_files_props['xtb_Nplus2'], cdft_descriptors,self)
-        localDescriptors = calculate_local_CDFT_descriptors(xtb_files_props['xtb_fukui'], cdft_descriptors, cdft_descriptors2,self)
+        cdft_descriptors  = calculate_global_CDFT_descriptors_part( xtb_files_props['xtb_out'], xtb_files_props['xtb_Nminus1'], xtb_files_props['xtb_Nminus2'], xtb_files_props['xtb_Nplus1'], xtb_files_props['xtb_Nplus2'],self)
+        localDescriptors = calculate_local_CDFT_descriptors(xtb_files_props['xtb_fukui'], cdft_descriptors,self)
         # create matrix of Wiberg bond-orders
         atoms = properties_dict.get("atoms")
         nat = len(atoms)
@@ -983,7 +958,7 @@ class qdescp:
 		"""
         json_data = read_json(xtb_files_props['xtb_json']) 
         json_data["Wiberg matrix"] = wbo_matrix.tolist()
-        list_properties = [properties_dict,properties_FOD,properties_solv,localgfn1,cdft_descriptors,cdft_descriptors2,localDescriptors]
+        list_properties = [properties_dict,properties_FOD,properties_solv,localgfn1,cdft_descriptors,localDescriptors]
         for properties in list_properties:
             if properties is not None:
                 json_data.update(properties)
@@ -993,10 +968,10 @@ class qdescp:
 		Morfeus Descriptors
 		"""
         #Global descriptors
-        global_properties_morfeus = calculate_global_morfeus_descriptors(self.final_xyz_path,self)
+        global_properties_morfeus = calculate_global_morfeus_descriptors(xtb_files_props['xtb_xyz_path'],self)
         json_data.update(global_properties_morfeus)
         #Local descriptors
-        local_properties_morfeus = calculate_local_morfeus_descriptors(self.final_xyz_path,self)
+        local_properties_morfeus = calculate_local_morfeus_descriptors(xtb_files_props['xtb_xyz_path'],self)
         json_data.update(local_properties_morfeus)
 
 
@@ -1079,21 +1054,22 @@ class qdescp:
                         # Initialize counter if it doesn't exist for this atom type
                         if atom_type not in atom_counters:
                             atom_counters[atom_type] = 1
-
                         # If the pattern is a single atom number, we include that number in the match name
                         if str(pattern).isdigit():  # This means the pattern is an atom number
                             match_name = f'{atom_type}{pattern}'
                         else:
                             # If it's a SMARTS pattern or more than one atom
-                            if len(smarts_targets) == 1 and len(smarts_targets[0]) == 1:
+                            if len(smarts_targets) == 1 and smarts_targets[0] in periodic_table():
                                 # Case where it's just an atom type without SMARTS
                                 if n_atoms_of_type == 1:
                                     match_name = f'{atom_type}'
                                 else:
                                     match_name = f'{atom_type}_{atom_counters[atom_type]}'
                             else:
+                                if pattern[0] == '#':
+                                    match_name = f'{atom_type}'
                                 # Regular SMARTS pattern handling
-                                if n_atoms_of_type == 1:
+                                elif n_atoms_of_type == 1:
                                     if idx_set is None:
                                         match_name = f'{pattern}_{atom_type}'
                                     else:
@@ -1112,9 +1088,12 @@ class qdescp:
                     for atom_idx, match_name in zip(sorted_indices, match_names):
                         idx_xtb = atom_idx
                         for prop in atom_props:
-                            json_data[f'{match_name}_{prop}'] = json_data[prop][idx_xtb]
-                            if f'{match_name}_{prop}' not in update_atom_props:
-                                update_atom_props.append(f'{match_name}_{prop}')
+                            try:
+                                json_data[f'{match_name}_{prop}'] = json_data[prop][idx_xtb]
+                                if f'{match_name}_{prop}' not in update_atom_props:
+                                    update_atom_props.append(f'{match_name}_{prop}')
+                            except (KeyError,IndexError): # prevents missing values
+                                pass
 
                     # Adding max and min values for functional groups with the same two atoms
                     if len(match_names) > 1 and n_types == 1:

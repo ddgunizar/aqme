@@ -15,8 +15,8 @@ import subprocess
 import rdkit
 from pathlib import Path
 import shutil
-from aqme.utils import read_file, run_command
-from aqme.filter import geom_filter
+from aqme.utils import read_file, run_command, mol_from_sdf_or_mol_or_mol2,set_destination,load_sdf
+from aqme.filter import geom_filter,cluster_conformers
 from rdkit.Chem import rdMolTransforms
 
 
@@ -66,8 +66,6 @@ def xyzall_2_xyz(xyzin, name):
 
 def xtb_opt_main(
     name,
-    dup_data,
-    dup_data_idx,
     self,
     charge,
     mult,
@@ -91,16 +89,10 @@ def xtb_opt_main(
     name_no_path = os.path.basename(Path(name)).split(".xyz")[0]
 
     # folder to create the files
-    if self.args.destination is None:
-        if method_opt == 'crest':
-            csearch_dir = Path(self.args.w_dir_main) / "CSEARCH"
-        elif method_opt == 'xtb':
-            csearch_dir = Path(self.args.w_dir_main) / "CMIN"
-    else:
-        if self.args.initial_dir.as_posix() in f"{self.args.destination}":
-            csearch_dir = Path(self.args.destination)
-        else:
-            csearch_dir = Path(self.args.initial_dir).joinpath(self.args.destination)
+    if method_opt == 'crest':
+        csearch_dir = set_destination(self,'CSEARCH')
+    elif method_opt == 'xtb':
+        csearch_dir = set_destination(self,'CMIN')
 
     # create the initial xyz input
     if method_opt == 'crest':
@@ -254,25 +246,25 @@ def xtb_opt_main(
 
             os.rename(str(dat_dir) + "/xtbopt.xyz", xyzoutxtb1)
         except FileNotFoundError:
-            self.args.log.write(f"\nx  There was an error during the xTB pre-optimization. This error is related to parallelization of xTB jobs and is normally observed when using metal complexes in some operative systems/OpenMP versions. AQME is switching to using one processor (nprocs=1).\n")
+            self.args.log.write(f"\nx  There was an error during the xTB pre-optimization. This error might be related to parallelization of xTB jobs and is normally observed when using metal complexes in some operative systems/OpenMP versions. AQME is switching to using one processor (nprocs=1).\n")
             self.args.nprocs = 1
             try:
                 xtb_out1 = f'{os.path.dirname(Path(xyzin))}/{os.path.basename(Path(xyzin)).split(".xyz")[0]}'
                 if self.args.xtb_keywords is None:
                     comm_xtb = f"export OMP_STACKSIZE={self.args.stacksize} && export OMP_NUM_THREADS={self.args.nprocs},1 \
-                    && xtb {xyzin} --opt -c {charge} --uhf {int(mult) - 1} >> {xtb_out1}_xtb1.out"
+                    && xtb {xyzin} --opt -c {charge} --uhf {int(mult) - 1} -P 1 >> {xtb_out1}_xtb1.out"
                 else:
                     comm_xtb = f"export OMP_STACKSIZE={self.args.stacksize} && export OMP_NUM_THREADS={self.args.nprocs},1 \
-                    && xtb {xyzin} --opt -c {charge} --uhf {int(mult) - 1} {self.args.xtb_keywords} >> {xtb_out1}_xtb1.out"
+                    && xtb {xyzin} --opt -c {charge} --uhf {int(mult) - 1} {self.args.xtb_keywords} -P 1 >> {xtb_out1}_xtb1.out"
                     if " --ohess " in comm_xtb:
                         comm_xtb.remove("--opt ")
                 subprocess.call(comm_xtb, shell=False)
                 os.rename(str(dat_dir) + "/xtbopt.xyz", xyzoutxtb1)
             except FileNotFoundError:
                 if self.args.program.lower() == "crest":
-                    self.args.log.write(f"\nx  There was another error during the xTB pre-optimization that could not be fixed. Trying CREST directly with no xTB preoptimization.\n")
+                    self.args.log.write(f"\nx  There was another error during the xTB pre-optimization that could not be fixed even with nprocs=1. Trying CREST directly with no xTB preoptimization.\n")
                 else:
-                    self.args.log.write(f"\nx  There was another error during the xTB pre-optimization that could not be fixed (this molecule will be skipped).\n")
+                    self.args.log.write(f"\nx  There was another error during the xTB pre-optimization that could not be fixed even with nprocs=1 (this molecule will be skipped).\n")
                 opt_valid = False
                 mol_rd = None
 
@@ -311,7 +303,6 @@ def xtb_opt_main(
             command.append("--cinp")
             command.append(".xcontrol.sample")
             const_command = command.copy()
-
         if self.args.crest_keywords is not None:
             for keyword in self.args.crest_keywords.split():
                 command.append(keyword)
@@ -320,51 +311,55 @@ def xtb_opt_main(
             natoms = open("crest_best.xyz").readlines()[0].strip()
         except FileNotFoundError:
             self.args.log.write(f"\nx  CREST optimization failed! This might be caused by different reasons:\n   1) In metal complexes: using metal complexes without specifying any kind of template in the complex_type option (i.e. squareplanar).\n   2) In TSs: include the \"--noreftopo\" option in CREST with the crest_keywords option (i.e. crest_keywords=\"--noreftopo\").\n   3) In big systems: increase stacksize with the stacksize option (i.e. stacksize=\"4GB\").")
-            try:
-                self.args.log.write(f"\no  Trying the CREST calculations with stacksize=\"4GB\".")
-                os.environ["OMP_STACKSIZE"] = '4GB'
-                run_command(command, f"/{dat_dir}/{name_no_path}.out")
-                natoms = open("crest_best.xyz").readlines()[0].strip()
-            except FileNotFoundError:
-                self.args.log.write(f"\nx  CREST optimization failed again even with stacksize=\"4GB\"! Contact the administrators to check this issue in more detail.\n")
-                if constrained_opt and "--noreftopo" not in command:
-                    try:
-                        self.args.log.write(f"\no  Constraints were detected, trying a new CREST run with --noreftopo. WARNING! Check that your geometry doesn't isomerize!\n")
-                        if self.args.crest_keywords is not None:
-                            for keyword in self.args.crest_keywords.split():
-                                const_command.append(keyword)
-                        const_command.append('--noreftopo')
-                        run_command(const_command, f"/{dat_dir}/{name_no_path}.out")
-                        natoms = open("crest_best.xyz").readlines()[0].strip()
-                    except FileNotFoundError:
-                        self.args.log.write(f"\nx  CREST optimization failed again even with --noreftopo! Contact the administrators to check this issue in more detail.\n")
-                        opt_valid = False
-                else:
+            if constrained_opt and "--noreftopo" not in command:
+                try:
+                    self.args.log.write(f"\no  Constraints were detected, trying a new CREST run with --noreftopo. WARNING! Check that your geometry doesn't isomerize!\n")
+                    if self.args.crest_keywords is not None:
+                        for keyword in self.args.crest_keywords.split():
+                            const_command.append(keyword)
+                    const_command.append('--noreftopo')
+                    run_command(const_command, f"/{dat_dir}/{name_no_path}.out")
+                    natoms = open("crest_best.xyz").readlines()[0].strip()
+                except FileNotFoundError:
+                    self.args.log.write(f"\nx  CREST optimization failed again even with --noreftopo! Contact the administrators to check this issue in more detail.\n")
                     opt_valid = False
+            else:
+                opt_valid = False
+            if not opt_valid:
+                try:
+                    self.args.log.write(f"\no  Trying the CREST calculations with stacksize=\"4GB\".")
+                    os.environ["OMP_STACKSIZE"] = '4GB'
+                    run_command(command, f"/{dat_dir}/{name_no_path}.out")
+                    natoms = open("crest_best.xyz").readlines()[0].strip()
+                except FileNotFoundError:
+                    self.args.log.write(f"\nx  CREST optimization failed again even with stacksize=\"4GB\"! Contact the administrators to check this issue in more detail.\n")
 
         # CREGEN sorting
         try:
             if self.args.cregen and int(natoms) != 1 and opt_valid:
-                self.args.log.write(f"\no  Starting CREGEN sorting")
-                command = ["crest", "crest_best.xyz", "--cregen", "crest_conformers.xyz"]
+                cregen_text = f"\no  Starting CREGEN sorting"
+                command = ["crest", "crest_best.xyz", "--cregen", "crest_conformers.xyz", '--esort']
+                # we don't use this part, since the code runs a Butina clustering afterwards
+                # if self.args.auto_cluster:
+                #     cregen_text += ' and conformer selection through clustering (users can disable conformer selection with --auto_cluster False)'
+                #     command = command + ['--cluster', f'{self.args.sample}']
 
                 if self.args.cregen_keywords is not None:
                     for keyword in self.args.cregen_keywords.split():
                         command.append(keyword)
-
+                self.args.log.write(cregen_text)
                 run_command(command, f"{dat_dir}/{name_no_path}_cregen.out")
+
         except UnboundLocalError:
             pass
 
+        # rename final XYZ file
         try:
             if opt_valid:
-                if os.path.exists(str(dat_dir) + "/crest_clustered.xyz"):
-                    shutil.copy(str(dat_dir) + "/crest_clustered.xyz", xyzoutall)
-
-                elif os.path.exists(str(dat_dir) + "/crest_ensemble.xyz"):
-                    shutil.copy(str(dat_dir) + "/crest_ensemble.xyz", xyzoutall)
-                else:
-                    shutil.copy(str(dat_dir) + "/crest_conformers.xyz", xyzoutall)
+                for file_name in ['crest_clustered.xyz','crest_conformers.xyz.sorted','crest_ensemble.xyz','crest_conformers.xyz']:
+                    if os.path.exists(f'{dat_dir}/{file_name}'):
+                        shutil.copy(f'{dat_dir}/{file_name}', xyzoutall)
+                        break
         except FileNotFoundError:
             self.args.log.write("\nx  CREST conformer sampling failed! Please, try other options (i.e. include constrains, change the crest_keywords option, etc.)")
             opt_valid = False
@@ -381,10 +376,22 @@ def xtb_opt_main(
             subprocess.run(command_xyz, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         if self.args.program.lower() == "crest":
-            sdwriter = Chem.SDWriter(str(f"{csearch_dir}/{name_no_path}.sdf"))
+            csearch_file = str(f"{csearch_dir}/{name_no_path}.sdf")
+            sdwriter = Chem.SDWriter(csearch_file)
+
         sdf_files = glob.glob(name_no_path + "*.sdf")
+        # the next function is needed to keep the order (glob.glob sorts first 1, then 10 instead of 2)
+        try:
+            def func(x):
+                return int(x.split('_')[-1].split('.')[0])
+            sdf_files = sorted(sdf_files, key=func)
+        except ValueError: # for CMIN and QDESCP xTB optimizations
+            pass
         for file in sdf_files:
             mol = rdkit.Chem.SDMolSupplier(file, removeHs=False, sanitize=False)
+            # transform invalid SDF files created with GaussView into valid SDF from Open Babel
+            if None in mol:
+                mol = load_sdf(file)
             mol_rd = rdkit.Chem.RWMol(mol[0])
             file_nopath = f'{os.path.basename(Path(file)).split(".sdf")[0]}'
             if self.args.program.lower() == "xtb":
@@ -395,9 +402,12 @@ def xtb_opt_main(
                 os.remove(file)
             elif self.args.program.lower() == "crest":
                 # convert from hartree (default in xtb) to kcal
-                energy_Eh = float(open(file, "r").readlines()[0])
+                try:
+                    energy_Eh = float(open(file, "r").readlines()[0])
+                except ValueError: # for calcs with a single atom
+                    energy_Eh = float(open(f'{file}', "r").readlines()[0].split()[1])
                 energy_kcal = str(energy_Eh*627.5)
-                mol_rd.SetProp("_Name", name_no_path)
+                mol_rd.SetProp("_Name", '.'.join(file.split('.')[:-1]))
                 mol_rd.SetProp("Energy", energy_kcal)
                 mol_rd.SetProp("Real charge", str(charge))
                 mol_rd.SetProp("Mult", str(int(mult)))
@@ -409,10 +419,28 @@ def xtb_opt_main(
                     sdwriter.write(mol_rd)
                 os.remove(file)
                 os.remove(f'{file_nopath}.xyz')
+
+        # sorting and clusterization
         if self.args.program.lower() == "crest":
             sdwriter.close()
+            suppl, _, _, _ = mol_from_sdf_or_mol_or_mol2(f'{csearch_file}', "csearch", self.args)
+            os.remove(f'{csearch_file}')
+            # sort by energy (even though CREGEN should do that automatically, it fails to do so sometimes)
+            allenergy = []
+            for mol in suppl:
+                allenergy.append(float(mol.GetProp('Energy')))
+            suppl = [mol for _, mol in sorted(zip(allenergy, suppl), key=lambda pair: pair[0])]
+
+            sdwriter = Chem.SDWriter(f'{csearch_file}')
+            for mol in suppl:
+                sdwriter.write(mol)
+            sdwriter.close()
+            if len(suppl) > self.args.sample and self.args.auto_cluster:
+                _ = cluster_conformers(self,suppl,"rdkit",csearch_file,name)
+            
     else:
         xyz_files = []
+        energy_kcal = None
 
     # remove xTB/CREST files to avoid wrong readings of molecular information
     for file in glob.glob('*') + glob.glob('*.*') + glob.glob('.*'):
@@ -426,9 +454,7 @@ def xtb_opt_main(
                 elif self.args.program.lower() == "crest":
                     if file.find('_xtb2') == -1 and file.find('_xtb1') == -1 and file.find('.out') == -1:
                         try:
-                            if file == 'crest_clustered.xyz':
-                                os.rename('crest_clustered.xyz', f"{dat_dir}/{name_no_path}_clustered.xyz")
-                            else:
+                            if os.path.basename(file) != os.path.basename(xyzoutall):
                                 try:
                                     os.remove(file)
                                 except OSError: # this avoids problems when running AQME in HPCs
@@ -442,7 +468,6 @@ def xtb_opt_main(
     os.chdir(self.args.w_dir_main)
 
     if method_opt == 'crest':
-        dup_data.at[dup_data_idx, "crest-conformers"] = len(xyz_files)
         return 1
 
     if method_opt == 'xtb':
@@ -588,19 +613,19 @@ def nci_ts_mol(
     constraints_dihedral,
 ):
     using_const = None
-    if constraints_atoms is not None:
+    if constraints_atoms is not None and constraints_atoms != []:
         using_const = constraints_atoms
         constraints_atoms = [[float(y) for y in x] for x in constraints_atoms]
         constraints_atoms = np.array(constraints_atoms)
-    if constraints_dist is not None:
+    if constraints_dist is not None and constraints_dist != []:
         using_const = constraints_dist
         constraints_dist = [[float(y) for y in x] for x in constraints_dist]
         constraints_dist = np.array(constraints_dist)
-    if constraints_angle is not None:
+    if constraints_angle is not None and constraints_angle != []:
         using_const = constraints_angle
         constraints_angle = [[float(y) for y in x] for x in constraints_angle]
         constraints_angle = np.array(constraints_angle)
-    if constraints_dihedral is not None:
+    if constraints_dihedral is not None and constraints_dihedral != []:
         using_const = constraints_dihedral
         constraints_dihedral = [[float(y) for y in x] for x in constraints_dihedral]
         constraints_dihedral = np.array(constraints_dihedral)
@@ -658,7 +683,7 @@ def nci_ts_mol(
     adapted_angle = []
     adapted_dihedral = []
     # assign constraints
-    if using_const is not None:
+    if using_const != [] and using_const is not None:
         for smi_part in smi:
             if ':' not in smi_part or '[' not in smi_part: # for SMILES that are not mapped
                 log.write(f"\nx  Constraints were specified {using_const} but atoms might not be mapped in the SMILES input!")

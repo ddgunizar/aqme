@@ -10,7 +10,7 @@ import random
 from rdkit.Chem import AllChem as Chem
 from rdkit.Chem import rdMolTransforms, rdMolAlign
 
-from aqme.utils import set_metal_atomic_number, get_conf_RMS
+from aqme.utils import set_metal_atomic_number, get_conf_RMS, load_sdf
 from aqme.csearch.utils import minimize_rdkit_energy
 
 
@@ -60,6 +60,7 @@ def realign_mol(
         maxIters=100,
     )
     energy = float(forcefield.CalcEnergy())
+
     return mol, energy
 
 
@@ -93,26 +94,26 @@ def generating_conformations_fullmonte(
     rotmatches,
     selectedcids_rdkit,
     outmols,
-    sdwriter,
-    dup_data,
-    dup_data_idx,
+    csearch_file,
     coord_Map,
     alg_Map,
     mol_template,
     ff,
+    metal_atoms,
+    metal_idx, 
+    metal_sym
 ):
 
-    ##working with fullmonte
+    # working with fullmonte
     n_unique_conformers = len(selectedcids_rdkit)
-    args.log.write(f"\no  Generation of confomers using FULLMONTE using {n_unique_conformers} unique conformer(s) as starting point(s)")
-
+    args.log.write(f"\no  Generation of confomers with FULLMONTE using {n_unique_conformers} unique conformer(s) as starting point(s)")
     # Writing the conformers as mol objects to sdf
     sdtemp = Chem.SDWriter(name + "_" + "rdkit" + args.output)
     for conf in selectedcids_rdkit:
         sdtemp.write(outmols[conf], conf)
     sdtemp.close()
 
-    fmmols = Chem.SDMolSupplier(name + "_" + "rdkit" + args.output, removeHs=False)
+    fmmols = load_sdf(name + "_" + "rdkit" + args.output)
     if fmmols is None:
         args.log.write("Could not open " + name + args.output)
         args.log.finalize()
@@ -196,18 +197,17 @@ def generating_conformations_fullmonte(
 
         nsteps += 1
 
-    dup_data.at[dup_data_idx, "FullMonte-Unique-conformers"] = len(unique_mol)
-
     cids = list(range(len(unique_mol)))
     sorted_all_cids = sorted(cids, key=lambda cid: c_energy[cid])
 
-    # STEP 9: WRITE FINAL uniques to sdf for xtb or ani
+    # STEP 9: WRITE FINAL uniques to sdf
+    sdwriter = Chem.SDWriter(str(csearch_file))
     for i, cid in enumerate(sorted_all_cids):
         unique_mol[cid].SetProp("_Name", name + " " + str(i))
         if coord_Map is None and alg_Map is None and mol_template is None:
             # setting the metal back instead of I
-            if len(args.metal_atoms) >= 1:
-                set_metal_atomic_number(unique_mol[cid], args.metal_idx, args.metal_sym)
+            if len(metal_atoms) >= 1:
+                set_metal_atomic_number(unique_mol[cid], metal_idx, metal_sym)
             sdwriter.write(unique_mol[cid])
         else:
             mol_realigned, _ = realign_mol(
@@ -219,10 +219,11 @@ def generating_conformations_fullmonte(
                 args.opt_steps_rdkit,
             )
             # setting the metal back instead of I
-            if len(args.metal_atoms) >= 1:
-                set_metal_atomic_number(mol_realigned, args.metal_idx, args.metal_sym)
+            if len(metal_atoms) >= 1:
+                set_metal_atomic_number(mol_realigned, metal_idx, metal_sym)
             sdwriter.write(mol_realigned)
 
+    sdwriter.close()
     status = 1
 
     return status

@@ -14,17 +14,21 @@
 .. |Codecov| image:: https://img.shields.io/codecov/c/github/jvalegre/aqme?label=Codecov&logo=codecov
    :target: https://codecov.io/gh/jvalegre/aqme
 
-.. |Downloads| image:: https://img.shields.io/conda/dn/conda-forge/aqme?label=Downloads&logo=Anaconda
-   :target: https://anaconda.org/conda-forge/aqme
+.. |Downloads| image:: https://img.shields.io/pepy/dt/aqme?label=Downloads&logo=pypi
+   :target: https://www.pepy.tech/projects/aqme
 
 .. |ReadtheDocs| image:: https://img.shields.io/readthedocs/aqme?label=Read%20the%20Docs&logo=readthedocs
    :target: https://aqme.readthedocs.io
    :alt: Documentation Status
 
+.. |PyPI| image:: https://img.shields.io/pypi/v/aqme
+   :target: https://pypi.org/project/aqme/
+
 |CircleCI|
 |Codecov|
 |Downloads|
 |ReadtheDocs|
+|PyPI|
 
 .. badges-end
 
@@ -94,31 +98,26 @@ installed as follows:
 
 **1.** Create and activate the conda environment where you want to install the program. If you are not sure of what 
 this point means, check out the "Users with no Python experience" section. This is an example for Python 3.10, but 
-it also works for other Python versions (i.e., 3.7, 3.9 and 3.11):
+it also works for newer Python versions (i.e., 3.11 and 3.12):
 
 .. code-block:: shell 
    
    conda create -n aqme python=3.10
    conda activate aqme
 
-**2.** Install AQME using conda-forge:  
+**2.** Install AQME and OpenBabel using pip:  
 
 .. code-block:: shell 
    
-   conda install -c conda-forge aqme
-
-**3.** Update AQME to the latest version (do not skip this step!):  
-
-.. code-block:: shell
-
-   pip install aqme --upgrade
-
-**4.** (Just if the installation with conda-forge is too slow) Users might install AQME using pip, then install RDKit and OpenBabel with conda-forge:  
-
-.. code-block:: shell
-
    pip install aqme
-   conda install -c conda-forge openbabel
+   conda install -y -c conda-forge openbabel=3.1.1
+
+**3.** (Just if the installation with pip of step 2 is too slow) Users might install AQME using conda and update it with pip:  
+
+.. code-block:: shell
+
+   conda install -y -c conda-forge aqme
+   pip install aqme --upgrade
 
 Installation of extra requirements
 ++++++++++++++++++++++++++++++++++
@@ -127,11 +126,11 @@ Extra requirements if xTB or CREST are used (compatible with MacOS and Linux onl
 
 .. code-block:: shell 
 
-   conda install -y -c conda-forge xtb
+   conda install -y -c conda-forge xtb=6.7.1
 
 .. code-block:: shell 
 
-   conda install -y -c conda-forge crest
+   conda install -y -c conda-forge crest=3.0.2
 
 Extra requirements if `CMIN` is used with ANI models:  
 
@@ -142,12 +141,6 @@ Extra requirements if `CMIN` is used with ANI models:
 .. code-block:: shell 
 
    pip install torch torchvision torchani
-
-Extra requirements if `QDESCP` is used with DBSTEP:  
-
-.. code-block:: shell 
-
-   pip install dbstep
 
 .. installation-end 
 
@@ -176,16 +169,16 @@ you can install `Miniconda with Python 3 <https://docs.conda.io/projects/minicon
 
 **3.** Create a conda environment called "aqme" with Python (:code:`conda create -n aqme python=3.10`). 
 |br|
-*This is an example for Python 3.10, but it also works for other Python versions (i.e., 3.7, 3.9 and 3.11).*
+*This is an example for Python 3.10, but it also works for newer Python versions (i.e., 3.11 and 3.12).*
 
 
 **4.** Activate the conda environment called "aqme" (:code:`conda activate aqme`).
 
 
-**5.** Install AQME as defined in the "Installation" section (:code:`conda install -c conda-forge aqme`).
+**5.** Install AQME as defined in the "Installation" section (:code:`pip install aqme`).
 
 
-**6.** Update AQME as defined in the "Installation" section (:code:`pip install aqme --upgrade`).
+**6.** Install OpenBabel as defined in the "Installation" section (:code:`conda install -y -c conda-forge openbabel=3.1.1`).
 
 
 Using AQME through Jupyter Notebooks
@@ -227,7 +220,7 @@ Requirements
 Python and Python libraries
 +++++++++++++++++++++++++++
 
-*  Python >= 3.6
+*  Python >= 3.10
 *  pandas
 *  Numpy
 *  PyYAML
@@ -236,8 +229,6 @@ Python and Python libraries
 *  cffi
 *  (opt) torch, torchvision and torchani
 
-*These libraries (except opt) are installed during the initial conda-forge installation.*
-
 Other requirements
 ++++++++++++++++++
 
@@ -245,8 +236,6 @@ Other requirements
 *  Openbabel
 *  xTB
 *  CREST
-
-*RDKit and Openbabel are installed during the initial conda-forge installation.*
 
 .. requirements-end
 
@@ -455,6 +444,11 @@ List of main developers and contact emails:
    `Github <https://github.com/rperezsoto>`__ ,
    `email <rperezsoto.research@gmail.com>`__ ] 
    worked in refactoring the code and creating the documentation.
+*  Brenda Manzanilla [
+   `webpage <https://orcid.org/0000-0001-5955-6079>`__ ,
+   `Github <https://github.com/ManzanillaB>`__ , 
+   `email <iqmanzanilla@gmail.com>`__] 
+   developer of the QDESCP module.
 *  Turki Alturaifi [
    `webpage <https://www.chem.pitt.edu/person/turki-alturaifi>`__ ,
    `Github <https://github.com/turkiAlturaifi>`__ , 
@@ -486,7 +480,7 @@ Reference
 .. reference-start
 
 If you use any of the AQME modules, please include this citation:  
-  * AQME v1.5, Alegre-Requena, J. V.; Sowndarya, S.; Pérez-Soto, R.; Alturaifi, T.; Paton, R. AQME: Automated Quantum Mechanical Environments for Researchers and Educators. Wiley Interdiscip. Rev. Comput. Mol. Sci. 2023, 13, e1663. (DOI: 10.1002/wcms.1663.)  
+  * Alegre-Requena, J. V.; Sowndarya, S.; Pérez-Soto, R.; Alturaifi, T.; Paton, R. AQME: Automated Quantum Mechanical Environments for Researchers and Educators. *Wiley Interdiscip. Rev. Comput. Mol. Sci.* **2023**, *13*, e1663. (DOI: 10.1002/wcms.1663)  
   
 Additionally, please include the corresponding references for the following programs:  
   * If you used CSEARCH with RDKit methods: `RDKit <https://www.rdkit.org/>`__ 

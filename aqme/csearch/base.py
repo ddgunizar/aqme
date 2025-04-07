@@ -24,9 +24,6 @@ General
      Directory to create the output file(s)   
    varfile : str, default=None  
       Option to parse the variables using a yaml file (specify the filename)  
-   max_workers : int, default=4  
-      Number of simultaneous RDKit jobs run with multiprocessing 
-      (WARNING! More than 12 simultaneous jobs might collapse your computer!)  
    charge : int, default=None  
       Charge of the calculations used in the following input files. 
       If charge isn't defined, it automatically reads the charge of the 
@@ -47,14 +44,18 @@ General
 General RDKit-based
 +++++++++++++++++++
 
-   sample : int, default='auto'
-      Number of conformers used initially in the RDKit sampling. If this option 
-      isn't specified, AQME automatically calculates (previously benchmarked) an
-      approximate number based on number of rotatable bonds, XH (i.e. OH) groups, 
-      saturated cycles, etc (see the auto_sampling() function in csearch.py for 
-      more information)
-   auto_sample : int, default=20
-      Base multiplicator number used in the sample option
+   sample : int, default=25
+      Number of conformers to keep after the initial RDKit sampling. They are selected using a
+      combination of RDKit energies and Butina clustering
+   auto_sample : str, default=mid in CSEARCH, low in QDESCP
+      Apply automatic calculation of the number of conformers generated initially with RDKit. This number
+      of conformers is initially generated and then reduced to the number specified in --sample with
+      different filters. There is a sampling factor, which is multiplied by the number of rotatable bonds,
+      and a maximum number of conformers allowed to pass to the filters. Options:
+      1. Low: good for descriptor generation in machine learning. Base multiplier = 5, max number of confs = 100
+      2. Mid: standard, good compromise between number of conformers and computing time. Base multiplier = 10, max number of confs = 250
+      3. High: demanding method, more conformers and time. Base multiplier = 20, max number of confs = 500
+      4. False: use the number of conformers specified in --sample
    ff : str, default='MMFF'
       Force field used in RDKit optimizations and energy calculations. Current 
       options: MMFF and UFF (if MMFF fails, AQME tries to use UFF automatically)
@@ -145,7 +146,7 @@ Fullmonte only
 CREST only
 ++++++++++
 
-   nprocs : int, default=2
+   nprocs : int, default=8
       Number of processors used in CREST optimizations
    constraints_atoms : list, default=[]
       Specify constrained atoms as [AT1,AT2,AT3]. An example of multiple constraints with
@@ -167,14 +168,14 @@ CREST only
    crest_keywords : str, default=None
       Define additional keywords to use in CREST that are not included in --chrg, 
       --uhf, -T and -cinp. For example: '--alpb ch2cl2 --nci --cbonds 0.5'
-   cregen : bool, default=False
+   cregen : bool, default=True
       If True, perform a CREGEN analysis after CREST (filtering options below)
    cregen_keywords : str, default=None
       Additional keywords for CREGEN (i.e. cregen_keywords='--ethr 0.02')
    xtb_keywords : str, default=None
       Define additional keywords to use in the xTB pre-optimization that are not 
       included in -c, --uhf, -P and --input. For example: '--alpb ch2cl2 --gfn 1'
-   crest_nrun : int, default=1
+   crest_runs : int, default=1
       Specify as number of runs if multiple starting points from RDKit starting points is required.
 """
 #####################################################.
@@ -189,23 +190,19 @@ import time
 import shutil
 import subprocess
 import glob
-from pathlib import Path
-import pandas as pd
 import concurrent.futures as futures
-import multiprocessing as mp
+from pathlib import Path
 from progress.bar import IncrementalBar
-import numpy as np
 
 from rdkit.Chem import AllChem as Chem
 from rdkit.Chem import Descriptors as Descriptors
-from rdkit.Chem import rdmolfiles
-from rdkit.Chem import rdMolTransforms, PropertyMol, rdDistGeom, Lipinski
+from rdkit.Chem import rdmolfiles, rdMolTransforms, PropertyMol, rdDistGeom, Lipinski
 
 from aqme.filter import (
-    filters, ewin_filter,
-    pre_E_filter,
-    RMSD_and_E_filter,
-    geom_filter
+    filters,
+    conformer_filters,
+    geom_filter,
+    cluster_conformers
     )
 from aqme.csearch.utils import (
     prepare_direct_smi,
@@ -215,23 +212,25 @@ from aqme.csearch.utils import (
     prepare_com_files,
     prepare_sdf_files,
     prepare_pdb_files,
-    creation_of_dup_csv_csearch,
     minimize_rdkit_energy,
     com_2_xyz,
     check_constraints,
     smi_to_mol,
     getDihedralMatches,
-    cluster_conformers
+    substituted_mol
     )
 from aqme.csearch.templates import template_embed, check_metal_neigh
 from aqme.csearch.fullmonte import generating_conformations_fullmonte, realign_mol
 from aqme.utils import (
-    substituted_mol,
     load_variables,
     set_metal_atomic_number,
     check_xtb,
     check_crest,
-    get_files
+    get_files,
+    check_dependencies,
+    mol_from_sdf_or_mol_or_mol2,
+    set_destination,
+    load_sdf
     )
 from aqme.csearch.crest import xtb_opt_main
 
@@ -248,6 +247,9 @@ class csearch:
         start_time_overall = time.time()
         # load default and user-specified variables
         self.args = load_variables(kwargs, "csearch")
+        
+        # check whether dependencies are installed
+        _ = check_dependencies(self)
 
         csearch_program = True
         if self.args.program is None:
@@ -260,8 +262,18 @@ class csearch:
             self.args.log.finalize()
             sys.exit()
 
-        if str(self.args.auto_metal_atoms) == "False":
-            self.args.auto_metal_atoms = False
+        if self.args.ff.upper() not in ["MMFF", "UFF"]:
+            self.args.log.write(f"x  Force field {self.args.ff} not supported!")
+            self.args.log.finalize()
+            sys.exit()
+
+        # set number of processors (threads for CSEARCH)
+        if self.args.nprocs is None:
+            self.args.nprocs = 4
+
+        # default value of auto_sample
+        if self.args.auto_sample == 'auto':
+            self.args.auto_sample = 'mid'
 
         if self.args.program.lower() == "crest":
             _ = check_xtb(self)
@@ -307,20 +319,10 @@ class csearch:
             self.args.log.write(f"\nStarting CSEARCH with {len(job_inputs)} job(s) (SDF, XYZ, CSV, etc. files might contain multiple jobs/structures inside)\n")
 
             # runs the conformer sampling with multiprocessors
-            self.run_csearch(job_inputs)
-
-            # store all the information into a CSV file
-            csearch_file_no_path = (
-                os.path.basename(Path(csearch_file)).split(".")[0]
-            )
-            self.csearch_csv_file = self.args.w_dir_main.joinpath(
-                f"CSEARCH-Data-{csearch_file_no_path}.csv"
-            )
-            if self.args.verbose:
-                self.final_dup_data.to_csv(self.csearch_csv_file, index=False)
+            _ = self.run_csearch(job_inputs)
 
             # removes systems that did not generate any conformers
-            for sdf_file in glob.glob(f'{self.args.w_dir_main}/CSEARCH/*.sdf'):
+            for sdf_file in glob.glob(f'{self.csearch_folder}/*.sdf'):
                 if os.path.getsize(sdf_file) == 0:
                     os.remove(sdf_file)
 
@@ -353,7 +355,7 @@ class csearch:
             "pdb",
         ]
 
-        file_format = os.path.basename(Path(csearch_file)).split('.')[1]
+        file_format = os.path.basename(Path(csearch_file)).split('.')[-1]
         # Checks
         if file_format.lower() not in SUPPORTED_INPUTS:
             self.args.log.write("\nx  Input filetype not currently supported!")
@@ -386,71 +388,52 @@ class csearch:
         return job_inputs
 
     def run_csearch(self, job_inputs):
-        # create the dataframe to store the data
-        self.final_dup_data = creation_of_dup_csv_csearch(self.args.program.lower())
 
         bar = IncrementalBar(
             "o  Number of finished jobs from CSEARCH", max=len(job_inputs)
         )
-        with futures.ProcessPoolExecutor(
-            max_workers=self.args.max_workers,
-        ) as executor:
-            # Submit a set of asynchronous jobs
-            jobs = []
-            # Submit the Jobs
+
+        # multiprocessing to accelerate and make CSEARCH reproducible (since RDKit uses 1 thread to be reproducible)
+        if not self.args.debug and self.args.program.lower() != 'crest': # errors and try/excepts are not shown in multithreading
+            with futures.ThreadPoolExecutor(
+                max_workers=self.args.nprocs,
+            ) as executor:
+                csearch_nprocs = 1
+                for job_input in job_inputs:
+                    _ = executor.submit(
+                        self.compute_confs, job_input,bar,csearch_nprocs
+                        )
+
+        else:
             for job_input in job_inputs:
-                (
-                    smi_,
-                    name_,
-                    charge_,
-                    mult_,
-                    constraints_atoms_,
-                    constraints_dist_,
-                    constraints_angle_,
-                    constraints_dihedral_,
-                    complex_type_,
-                    geom_
-                ) = job_input
-                job = executor.submit(
-                    self.compute_confs(
-                        smi_,
-                        name_,
-                        charge_,
-                        mult_,
-                        constraints_atoms_,
-                        constraints_dist_,
-                        constraints_angle_,
-                        constraints_dihedral_,
-                        complex_type_,
-                        geom_
-                    )
-                )
-                jobs.append(job)
+                _ = self.compute_confs(job_input,bar,self.args.nprocs)
 
-                bar.next()
+        bar.finish()
 
-            bar.finish()
 
-    def compute_confs(
-        self,
-        smi,
-        name,
-        charge,
-        mult,
-        constraints_atoms,
-        constraints_dist,
-        constraints_angle,
-        constraints_dihedral,
-        complex_type,
-        geom
-    ):
+    def compute_confs(self,job_input,bar,csearch_nprocs):
         """
         Function to start conformer generation
         """
 
+        # load variables from job_input
+        (
+            smi,
+            name,
+            charge,
+            mult,
+            constraints_atoms,
+            constraints_dist,
+            constraints_angle,
+            constraints_dihedral,
+            complex_type,
+            geom
+        ) = job_input
+        
         self.args.log.write(f"\n   ----- {os.path.basename(Path(name))} -----")
 
-        if self.args.smi is not None or os.path.basename(Path(self.args.input)).split(".")[1] in ["smi","csv","cdx","txt","yaml","yml","rtf"]:
+        # load mol and other parameters when using SMILES as input
+        if self.args.smi is not None or os.path.basename(Path(self.args.input)).split(".")[-1] in ["smi","csv","cdx","txt","yaml","yml","rtf"]:
             (
                 mol,
                 constraints_atoms,
@@ -469,72 +452,67 @@ class csearch:
                 constraints_dihedral,
             )
             if mol is None:
-                self.args.log.write(f"\nx  Failed to convert the provided SMILES ({smi}) to an RDkit Mol object! Please check the starting smiles.")
+                self.args.log.write(f"\nx  Failed to convert the provided SMILES ({smi}) to an RDkit Mol object! Please check the starting smiles ({os.path.basename(Path(name))})")
                 # if a list of SMILES is provided, the program doesn't stop if one SMILES fails to convert to mol
-                if os.path.basename(Path(self.args.input)).split(".")[1] not in ["csv","cdx","txt","yaml","yml","rtf"]:
+                if os.path.basename(Path(self.args.input)).split(".")[-1] not in ["csv","cdx","txt","yaml","yml","rtf"]:
                     self.args.log.finalize()
                     sys.exit()
+                bar.next()
                 return
 
         else:
             # for 3D input formats, the smi variable represents the mol object
             mol = smi
             if mol is None:
-                self.args.log.write(f"\nx  Failed to convert the provided input to an RDkit Mol object! Please check the starting structure.")
-                if os.path.basename(Path(self.args.input)).split(".")[1] not in ["csv","cdx","txt","yaml","yml","rtf"]:
+                self.args.log.write(f"\nx  Failed to convert the provided input to an RDkit Mol object! Please check the starting structure ({os.path.basename(Path(name))})")
+                if os.path.basename(Path(self.args.input)).split(".")[-1] not in ["csv","cdx","txt","yaml","yml","rtf"]:
                     self.args.log.finalize()
                     sys.exit()
+                bar.next()
                 return
                 
             # check if the optimization is constrained
             complex_ts = check_constraints(self)
 
-        if self.args.destination is None:
-            self.csearch_folder = Path(self.args.initial_dir).joinpath(
-                f"CSEARCH"
-            )
-        else:
-            if self.args.initial_dir.as_posix() in f"{self.args.destination}":
-                self.csearch_folder = Path(self.args.destination)
-            else:
-                self.csearch_folder = Path(self.args.initial_dir).joinpath(self.args.destination)
+        self.csearch_folder = set_destination(self,'CSEARCH')
 
         self.csearch_folder.mkdir(exist_ok=True, parents=True)
 
         # for 3D input types
         if self.args.program.lower() in ["crest"] and self.args.smi is None:
-            if os.path.basename(Path(self.args.input)).split(".")[1] in ["pdb", "mol2", "mol", "sdf"]:
+            if os.path.basename(Path(self.args.input)).split(".")[-1] in ["pdb", "mol2", "mol", "sdf"]:
                 command_pdb = [
                     "obabel",
-                    f'-i{os.path.basename(Path(self.args.input)).split(".")[1]}',
-                    f'{name}.{os.path.basename(Path(self.args.input)).split(".")[1]}',
+                    f'-i{os.path.basename(Path(self.args.input)).split(".")[-1]}',
+                    f'{name}.{os.path.basename(Path(self.args.input)).split(".")[-1]}',
                     "-oxyz",
-                    f"-O{os.path.dirname(Path(name))}/{os.path.basename(Path(name)).split('.')[0]}_{self.args.program.lower()}.xyz",
+                    f"-O{os.path.dirname(Path(name))}/{'.'.join(os.path.basename(Path(name)).split('.')[:-1])}_{self.args.program.lower()}.xyz",
                 ]
                 subprocess.run(
                     command_pdb,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-            elif os.path.basename(Path(self.args.input)).split(".")[1] in ["gjf", "com"]:
-                xyz_file, _, _ = com_2_xyz(f'{name}.{os.path.basename(Path(self.args.input)).split(".")[1]}')
+            elif os.path.basename(Path(self.args.input)).split(".")[-1] in ["gjf", "com"]:
+                xyz_file, _, _ = com_2_xyz(f'{name}.{os.path.basename(Path(self.args.input)).split(".")[-1]}')
                 shutil.move(xyz_file, f"{name}_{self.args.program.lower()}.xyz")
-            elif os.path.basename(Path(self.args.input)).split(".")[1] == "xyz":
+            elif os.path.basename(Path(self.args.input)).split(".")[-1] == "xyz":
                 shutil.copy(f"{name}.xyz", f"{name}_{self.args.program.lower()}.xyz")
 
-        template_opt = False
+        template_opt,valid_template_embed = False,True
 
         # detects metal atoms
+        metal_atoms,metal_idx,complex_coord,metal_sym = [],[],[],[]
         if self.args.auto_metal_atoms:
-            _ = self.find_metal_atom(mol,charge,mult)
+            metal_atoms = self.find_metal_atom(mol,charge,mult,name)
 
         # replaces the metal for an I atom
-        if len(self.args.metal_atoms) >= 1:
+        if len(metal_atoms) >= 1:
             (
-                self.args.metal_idx,
-                self.args.complex_coord,
-                self.args.metal_sym,
-            ) = substituted_mol(self, mol, "I")
+                metal_idx,
+                complex_coord, # this variable will be used for checking n of ligands when using templates
+                metal_sym,
+            ) = substituted_mol(mol, "I", metal_atoms)
 
             # get pre-determined geometries for metal complexes
             accepted_complex_types = [
@@ -544,17 +522,18 @@ class csearch:
                 "trigonalplanar",
             ]
             if complex_type != '' and complex_type not in accepted_complex_types:
-                self.args.log.write(f"x  The metal template specified in complex_type ({complex_type}) is not valid! Options: squareplanar, squarepyramidal, linear and trigonalplanar")
-                if os.path.basename(Path(self.args.input)).split(".")[1] not in ["csv","cdx","txt","yaml","yml","rtf"]:
+                self.args.log.write(f"x  The metal template specified in complex_type ({complex_type}) is not valid! Options: squareplanar, squarepyramidal, linear and trigonalplanar ({os.path.basename(Path(name))})")
+                if os.path.basename(Path(self.args.input)).split(".")[-1] not in ["csv","cdx","txt","yaml","yml","rtf"]:
                     self.args.log.finalize()
                     sys.exit()
+                bar.next()
                 return
 
             if complex_type in accepted_complex_types:
                 count_metals = 0
                 valid_template = True
                 # check if the specified metal is included in the system
-                for metal_idx_ind in self.args.metal_idx:
+                for metal_idx_ind in metal_idx:
                     if metal_idx_ind is not None:
                         # calculate number of expected neighbours
                         valid_template = check_metal_neigh(mol, complex_type, metal_idx_ind, self.args.log, valid_template)
@@ -564,43 +543,48 @@ class csearch:
                     template_opt = True
                     template_kwargs = dict()
                     template_kwargs["complex_type"] = complex_type
-                    template_kwargs["metal_idx"] = self.args.metal_idx
+                    template_kwargs["metal_idx"] = metal_idx
                     template_kwargs["maxsteps"] = self.args.opt_steps_rdkit
                     template_kwargs["heavyonly"] = self.args.heavyonly
                     template_kwargs["maxmatches"] = self.args.max_matches_rmsd
                     template_kwargs["mol"] = mol
                     template_kwargs["name"] = name
                     template_kwargs["geom"] = geom
-                    items = template_embed(self, **template_kwargs)
+                    try:
+                        items = template_embed(self, **template_kwargs)
+                    except RuntimeError:
+                        valid_template_embed = False
+                        self.args.log.write(f"\nx  Molecule {name} was not optimized in the specified template ({complex_type}). Try to use charges to make it easier for MM protocols (i.e. using [NH3+][Ag][NH3+] instead of [NH3][Ag][NH3], since N+ typically has 4 bonds).")
 
-                    total_data = creation_of_dup_csv_csearch(self.args.program.lower())
-
-                    for mol_obj, name_in, coord_map, alg_map, template, original_atn in zip(*items):
-                        data = self.conformer_generation(
-                            mol_obj,
-                            name_in,
-                            constraints_atoms,
-                            constraints_dist,
-                            constraints_angle,
-                            constraints_dihedral,
-                            complex_ts,
-                            charge,
-                            mult,
-                            smi,
-                            geom,
-                            coord_map,
-                            alg_map,
-                            template,
-                            original_atn
-                        )
-                        frames = [total_data, data]
-                        total_data = pd.concat(frames, sort=True)
+                    if valid_template_embed:
+                        for mol_obj, name_in, coord_map, alg_map, template, original_atn in zip(*items):
+                            _ = self.conformer_generation(
+                                mol_obj,
+                                name_in,
+                                constraints_atoms,
+                                constraints_dist,
+                                constraints_angle,
+                                constraints_dihedral,
+                                complex_ts,
+                                charge,
+                                mult,
+                                smi,
+                                geom,
+                                metal_atoms,
+                                metal_idx,
+                                metal_sym,
+                                csearch_nprocs,
+                                coord_map,
+                                alg_map,
+                                template,
+                                original_atn
+                            )
 
                 elif count_metals > 1 or count_metals == 0:
-                    self.args.log.write(f"\nx  The template specified {complex_type} is not used for systems with more than 1 metal or for organic molecueles.")
+                    self.args.log.write(f"\nx  The template specified {complex_type} is not used for systems with more than 1 metal or for organic molecules ({os.path.basename(Path(name))})")
 
-        if not template_opt:
-            total_data = self.conformer_generation(
+        if not template_opt and valid_template_embed:
+            _ = self.conformer_generation(
                 mol,
                 name,
                 constraints_atoms,
@@ -611,29 +595,33 @@ class csearch:
                 charge,
                 mult,
                 smi,
-                geom
+                geom,
+                metal_atoms,
+                metal_idx,
+                metal_sym,
+                csearch_nprocs
             )
 
-        # Updates the dataframe with infromation about conformer generation
-        frames = [self.final_dup_data, total_data]
-        self.final_dup_data = pd.concat(frames, ignore_index=True, sort=True)
+        bar.next()
 
     # automatic detection of metal atoms   
-    def find_metal_atom(self,mol,charge,mult):
-        self.args.metal_atoms = [] # for batch jobs such as CSV inputs with many SMILES
+    def find_metal_atom(self,mol,charge,mult,name):
+        metal_atoms = [] # for batch jobs such as CSV inputs with many SMILES
         transition_metals = ['Sc', 'Ti', 'V', 'Cr', 'Mn', 'Fe', 'Co', 'Ni', 'Cu', 'Zn', 'Y', 'Zr', 'Nb', 'Mo',
                             'Tc', 'Ru', 'Rh', 'Pd', 'Ag', 'Cd', 'Hf', 'Ta', 'W', 'Re', 'Os', 'Ir', 'Pt', 'Au',
                             'Hg', 'Rf', 'Db', 'Sg', 'Bh', 'Hs', 'Mt', 'Ds', 'Rg', 'Cn', 'Nh', 'Fl', 'Mc', 'Lv', 'Ts', 'Og']
         for atom in mol.GetAtoms():
             if atom.GetSymbol() in transition_metals:
-                self.args.metal_atoms.append(atom.GetSymbol())
-        if len(self.args.metal_atoms) > 0:
-            self.args.log.write(f"\no  AQME recognized the following metal atoms: {self.args.metal_atoms}")
+                metal_atoms.append(atom.GetSymbol())
+        if len(metal_atoms) > 0:
+            self.args.log.write(f"\no  AQME recognized the following metal atoms: {metal_atoms} ({os.path.basename(Path(name))})")
             if charge is None:
-                self.args.log.write(f"\nx  The automated charge calculation might not be precise for metal complexes! You should use the charge option (or the charge column in CSV inputs).")
+                self.args.log.write(f"\nx  The automated charge calculation might not be precise for metal complexes! You should use the charge option (or the charge column in CSV inputs) ({os.path.basename(Path(name))})")
             if mult is None:
-                self.args.log.write(f"\nx  The automated multiplicity calculation might not be precise for metal complexes! You should use the mult option (or the mult column in CSV inputs).")
+                self.args.log.write(f"\nx  The automated multiplicity calculation might not be precise for metal complexes! You should use the mult option (or the mult column in CSV inputs) ({os.path.basename(Path(name))})")
 
+        return metal_atoms
+    
     def conformer_generation(
         self,
         mol,
@@ -647,6 +635,10 @@ class csearch:
         mult,
         smi,
         geom,
+        metal_atoms,
+        metal_idx,
+        metal_sym,
+        csearch_nprocs,
         coord_Map=None,
         alg_Map=None,
         mol_template=None,
@@ -657,9 +649,6 @@ class csearch:
 
         """
 
-        dup_data = creation_of_dup_csv_csearch(self.args.program.lower())
-
-        dup_data_idx = 0
         status = None
 
         # Set charge and multiplicity
@@ -673,19 +662,13 @@ class csearch:
         if (
             self.args.program.lower() in ["crest"]
             and self.args.smi is None
-            and os.path.basename(Path(self.args.input)).split(".")[1] in ["pdb","mol2","mol","sdf","gjf","com","xyz"]
+            and os.path.basename(Path(self.args.input)).split(".")[-1] in ["pdb","mol2","mol","sdf","gjf","com","xyz"]
         ):
 
             valid_structure = True
-            if self.args.crest_nrun == 1:
-                start_time = time.time()
-                dup_data.at[dup_data_idx, "Real charge"] = charge
-                dup_data.at[dup_data_idx, "Mult"] = mult
-                dup_data.at[dup_data_idx, "Molecule"] = name
+            if self.args.crest_runs == 1:
                 status = xtb_opt_main(
                     f"{name}_{self.args.program.lower()}",
-                    dup_data,
-                    dup_data_idx,
                     self,
                     charge,
                     mult,
@@ -698,19 +681,11 @@ class csearch:
                     geom,
                     mol=mol, 
                 )
-                n_seconds = round(time.time() - start_time, 2)
-                dup_data.at[dup_data_idx, "CSEARCH time (seconds)"] = n_seconds
             else:
-                for pt in range(1, int(self.args.crest_nrun)+1):
-                    start_time = time.time()
-                    dup_data.at[dup_data_idx, "Real charge"] = charge
-                    dup_data.at[dup_data_idx, "Mult"] = mult
-                    dup_data.at[dup_data_idx, "Molecule"] = name + "_run_{0}".format(pt)
+                for pt in range(1, int(self.args.crest_runs)+1):
                     shutil.copy(f"{name}_{self.args.program.lower()}.xyz", f"{name}_run_{pt}_{self.args.program.lower()}.xyz")
                     status = xtb_opt_main(
                         f"{name}_run_{pt}_{self.args.program.lower()}",
-                        dup_data,
-                        dup_data_idx,
                         self,
                         charge,
                         mult,
@@ -723,20 +698,11 @@ class csearch:
                         geom,
                         mol=mol, 
                     )
-                    n_seconds = round(time.time() - start_time, 2)
-                    dup_data.at[dup_data_idx, "CSEARCH time (seconds)"] = n_seconds
-                    dup_data_idx +=1
 
         else:
-            start_time = time.time()
-            name = os.path.basename(Path(name)).split(".")[0]
-            self.csearch_file = self.csearch_folder.joinpath(
+            csearch_file = self.csearch_folder.joinpath(
                 name + "_" + self.args.program.lower() + self.args.output
             )
-            if self.args.crest_nrun != 1 and self.args.program.lower() =='crest':
-                sdwriter_init = None
-            else:
-                sdwriter_init = Chem.SDWriter(str(self.csearch_file))
 
             valid_structure = filters(
                 mol, self.args.log, self.args.max_mol_wt
@@ -744,12 +710,10 @@ class csearch:
             if valid_structure:
                 try:
                     # the conformational search for RDKit
-                    status, dup_data = self.summ_search(
+                    status = self.summ_search(
                         mol,
                         name,
-                        sdwriter_init,
-                        dup_data,
-                        dup_data_idx,
+                        csearch_file,
                         charge,
                         mult,
                         constraints_atoms,
@@ -762,22 +726,26 @@ class csearch:
                         mol_template,
                         smi,
                         geom,
-                        original_atn
+                        original_atn,
+                        metal_atoms,
+                        metal_idx,
+                        metal_sym,
+                        csearch_nprocs
                     )
                 except (KeyboardInterrupt, SystemExit):
                     raise
 
         if status == -1 or not valid_structure:
-            error_message = "\nx  ERROR: The structure is not valid or no conformers were obtained from this SMILES string"
+            error_message = f"\nx  ERROR: The structure is not valid or no conformers were obtained from this SMILES string ({os.path.basename(Path(name))})"
             self.args.log.write(error_message)
 
         #combining all the sdfs from more than one run
-        if self.args.crest_nrun != 1:
-            sdwriter_rd = Chem.SDWriter(str(self.csearch_file))
+        if self.args.crest_runs != 1:
+            sdwriter_rd = Chem.SDWriter(f'{csearch_file}')
             file_runs = glob.glob(str(self.csearch_folder)+'/'+ name +'_run_*'+ self.args.program.lower() +'.sdf')
             allenergy, allmols = [], []
             for file in file_runs:
-                mols = Chem.SDMolSupplier(file, removeHs=False)
+                mols = load_sdf(file)
                 for mol in mols:
                     allmols.append(mol)
                     allenergy.append(float(mol.GetProp('Energy')))
@@ -785,15 +753,13 @@ class csearch:
             allmols_sorted = [mol for _, mol in sorted(zip(allenergy, allmols), key=lambda pair: pair[0])]
             for mol in allmols_sorted:
                 sdwriter_rd.write(mol)
-        return dup_data
+            sdwriter_rd.close()
 
     def summ_search(
         self,
         mol,
         name,
-        sdwriter,
-        dup_data,
-        dup_data_idx,
+        csearch_file,
         charge,
         mult,
         constraints_atoms,
@@ -806,30 +772,30 @@ class csearch:
         mol_template,
         smi,
         geom,
-        original_atn
+        original_atn,
+        metal_atoms,
+        metal_idx,
+        metal_sym,
+        csearch_nprocs
     ):
 
         """
         Embeds, optimizes and filters RDKit conformers
         """
 
-        start_time = time.time()
-
         # writes sdf for the first RDKit conformer generation
         if not complex_ts:
             if self.args.program.lower() in ['rdkit']:
-                self.args.log.write(f"\no  Starting RDKit conformer sampling")
+                self.args.log.write(f"\no  Starting RDKit conformer sampling ({os.path.basename(Path(name))})")
             elif self.args.program.lower() in ['summ','fullmonte']:
-                self.args.log.write(f"\no  Starting RDKit-{self.args.program} conformer sampling")
-            elif self.args.program.lower() in ['crest'] and os.path.basename(Path(self.args.input)).split(".")[1] not in ["pdb","mol2","mol","sdf","gjf","com","xyz"]:
+                self.args.log.write(f"\no  Starting RDKit-{self.args.program} conformer sampling ({os.path.basename(Path(name))})")
+            elif self.args.program.lower() in ['crest'] and os.path.basename(Path(self.args.input)).split(".")[-1] not in ["pdb","mol2","mol","sdf","gjf","com","xyz"]:
                 self.args.log.write(f"\no  Starting initial RDKit-based mol generation from SMILES")
 
             status, rotmatches, ff, mol_crest = self.rdkit_to_sdf(
                 mol,
                 name,
-                dup_data,
-                dup_data_idx,
-                sdwriter,
+                csearch_file,
                 charge,
                 mult,
                 coord_Map,
@@ -837,46 +803,37 @@ class csearch:
                 mol_template,
                 smi,
                 geom,
-                original_atn
+                original_atn,
+                metal_atoms,
+                metal_idx,
+                metal_sym,
+                csearch_nprocs
             )
-            if self.args.program.lower() in ['rdkit','fullmonte'] :
-                n_seconds = round(time.time() - start_time, 2)
-                dup_data.at[dup_data_idx, "CSEARCH time (seconds)"] = n_seconds
 
-            # this avoids memory issues when using Windows
-            try:
-                if self.args.crest_nrun != 1 and self.args.program.lower() =='crest':
-                    pass
-                else:
-                    sdwriter.close()
-            except RuntimeError:
-                pass
             # reads the initial SDF files from RDKit and uses dihedral scan if selected
             if status not in [-1, 0]:
                 # getting the energy and mols after rotations
                 if self.args.program.lower() == "summ" and len(rotmatches) != 0:
                     status = self.dihedral_filter_and_sdf(
-                        name, dup_data, dup_data_idx, coord_Map, alg_Map, mol_template, ff
+                        name, csearch_file, coord_Map, 
+                        alg_Map, mol_template, ff, metal_atoms, metal_idx, metal_sym
                     )
-                    n_seconds = round(time.time() - start_time, 2)
-                    dup_data.at[dup_data_idx, "CSEARCH time (seconds)"] = n_seconds
 
         if self.args.program.lower() in ['crest']:
             stop_xtb_opt = False
             if not complex_ts:
-                # mol_crest is the RDKit-optimized mol object
+                # mol_crest is the RDKit-optimized mol object with all the conformers sorted by E
                 if mol_crest is not None:
-                    if self.args.crest_nrun == 1:
-                        dup_data.at[dup_data_idx, "Molecule"] = name
-                        rdmolfiles.MolToXYZFile(mol_crest[0], name + "_crest.xyz")
+                    if self.args.crest_runs == 1:
+                        os.remove(f'{csearch_file}')
+                        rdmolfiles.MolToXYZFile(mol_crest[0], name + "_crest.xyz") # use lowest E conformer
                     else:
-                        # clustering to get the best mol objects
-                        cluster_centroird_mols, centroids = cluster_conformers(mol_crest, self.args.heavyonly, self.args.max_matches_rmsd, self.args.crest_nclust)
-                        num_start_points = min(int(self.args.crest_nrun), len(cluster_centroird_mols))
-                        for pt in range(1, num_start_points+1):
-                            dup_data.at[dup_data_idx, "Molecule"] = name + "_run_{0}".format(pt)
-                            rdmolfiles.MolToXYZFile(cluster_centroird_mols[pt-1], name + "_run_{0}_crest.xyz".format(pt), confId=centroids[pt-1])
-                            
+                        # clustering to get the most different mol objects
+                        suppl, _, _, _ = mol_from_sdf_or_mol_or_mol2(f'{csearch_file}', "csearch", self.args)
+                        os.remove(f'{csearch_file}')
+                        cluster_centroid_mols = cluster_conformers(self,suppl,"crest",csearch_file,name)
+                        for i,mol in enumerate(cluster_centroid_mols):
+                            rdmolfiles.MolToXYZFile(mol, f'{name}_run_{i}_crest.xyz')                            
                 else:
                     stop_xtb_opt = True
                     status = -1
@@ -884,25 +841,19 @@ class csearch:
                 # mol is the raw mol object (no optimization with RDKit to avoid problems when using
                 # noncovalent complexes and TSs)
                 if mol is not None:
-                    if self.args.crest_nrun == 1:
-                        dup_data.at[dup_data_idx, "Molecule"] = name
+                    if self.args.crest_runs == 1:
                         rdmolfiles.MolToXYZFile(mol, name + "_crest.xyz")
                     else:
-                        num_start_points = min(int(self.args.crest_nrun), len(mol_crest))
+                        num_start_points = min(int(self.args.crest_runs), len(mol_crest))
                         for pt in range(1, num_start_points+1):
-                            dup_data.at[pt-1, "Molecule"] = name + "_run_{0}".format(pt)
                             rdmolfiles.MolToXYZFile(mol, name + "_run_{0}_crest.xyz".format(pt))
                 else:
                     stop_xtb_opt = True
                     status = -1
             if not stop_xtb_opt:
-                start_time = time.time()
-                dup_data.at[dup_data_idx, "Molecule"] = name
-                if self.args.crest_nrun == 1:
+                if self.args.crest_runs == 1:
                     status = xtb_opt_main(
                         f"{name}_{self.args.program.lower()}",
-                        dup_data,
-                        dup_data_idx,
                         self,
                         charge,
                         mult,
@@ -916,18 +867,11 @@ class csearch:
                         complex_ts=complex_ts,
                         mol=mol, # this is necessary for CREST calculations with constraints 
                         )
-                    n_seconds = round(time.time() - start_time, 2)
-                    dup_data.at[dup_data_idx, "CSEARCH time (seconds)"] = n_seconds
                 else:
-                    num_start_points = min(int(self.args.crest_nrun), len(mol_crest))
-                    dup_data = pd.DataFrame(np.repeat(dup_data.values, num_start_points, axis=0), columns=dup_data.columns)
+                    num_start_points = min(int(self.args.crest_runs), len(mol_crest))
                     for pt in range(1, num_start_points+1):
-                        start_time = time.time()
-                        dup_data.at[pt-1, "Molecule"] = f"{name}_run_{pt}"
                         status = xtb_opt_main(
                             f"{name}_run_{pt}_{self.args.program.lower()}",
-                            dup_data,
-                            pt-1,
                             self,
                             charge,
                             mult,
@@ -939,31 +883,22 @@ class csearch:
                             'crest',
                             geom,
                             complex_ts=complex_ts,
-                            mol=mol, # this is necessary for CREST calculations with constraints
-                            
+                            mol=mol, # this is necessary for CREST calculations with constraints 
                         )
-                        n_seconds = round(time.time() - start_time, 2)
-                        dup_data.at[pt-1, "CSEARCH time (seconds)"] = n_seconds
 
-        return status, dup_data
+        return status
 
     def dihedral_filter_and_sdf(
-        self, name, dup_data, dup_data_idx, coord_Map, alg_Map, mol_template, ff
+        self, name, csearch_file, coord_Map, alg_Map, 
+        mol_template, ff, metal_atoms, metal_idx, metal_sym
     ):
         """
         Filtering after dihedral scan to sdf
         """
 
         rotated_energy = []
-
         # apply filters
-        rdmols = Chem.SDMolSupplier(str(self.csearch_file), removeHs=False) 
-        if rdmols is None:
-            self.args.log.write("\nCould not open " + name + self.args.output)
-            if os.path.basename(Path(self.args.input)).split(".")[1] not in ["csv","cdx","txt","yaml","yml","rtf"]:
-                self.args.log.finalize()
-                sys.exit()
-            return
+        rdmols = load_sdf(csearch_file)
 
         for i, rd_mol_i in enumerate(rdmols):
             if coord_Map is None and alg_Map is None and mol_template is None:
@@ -985,74 +920,69 @@ class csearch:
         sorted_rotated_cids = sorted(rotated_cids, key=lambda cid: rotated_energy[cid])
 
         # filter based on energy window ewin_csearch
-        sortedcids_rotated = ewin_filter(
-            sorted_rotated_cids,
-            rotated_energy,
-            dup_data,
-            dup_data_idx,
-            "summ",
-            self.args.ewin_csearch,
-        )
-        # pre-filter based on energy only
-        selectedcids_initial_rotated = pre_E_filter(
-            sortedcids_rotated,
-            rotated_energy,
-            dup_data,
-            dup_data_idx,
-            "summ",
-            self.args.initial_energy_threshold,
-        )
-        # filter based on energy and RMSD
-        selectedcids_rotated = RMSD_and_E_filter(
-            rdmols,
-            selectedcids_initial_rotated,
-            rotated_energy,
-            self.args,
-            dup_data,
-            dup_data_idx,
-            "summ",
-        )
+        selectedcids_rotated = conformer_filters(self,sorted_rotated_cids,rotated_energy,rdmols)
+
         mol_select = []
         for i, cid in enumerate(selectedcids_rotated):
             mol_rd = Chem.RWMol(rdmols[cid])
             mol_rd.SetProp("_Name", rdmols[cid].GetProp("_Name") + " " + str(i))
             mol_rd.SetProp("Energy", str(rotated_energy[cid]))
             # setting the metal back instead of I
-            if len(self.args.metal_atoms) >= 1:
+            if len(metal_atoms) >= 1:
                 set_metal_atomic_number(
-                    mol_rd, self.args.metal_idx, self.args.metal_sym
+                    mol_rd, metal_idx, metal_sym
                 )
             mol_select.append(mol_rd) 
 
-        # update SDF file            
-        os.remove(self.csearch_file)
-        sdwriter_rd = Chem.SDWriter(str(self.csearch_file))
+        # update SDF file
+        os.remove(csearch_file)
+        sdwriter_upd = Chem.SDWriter(f'{csearch_file}')
         for mol in mol_select:
-            sdwriter_rd.write(mol)
-        sdwriter_rd.close()
+            sdwriter_upd.write(mol)
+        sdwriter_upd.close()
         status = 1
+
         return status
 
-    def auto_sampling(self, mol):
+    def auto_sampling(self, mol, metal_atoms, metal_idx):
         """
         Detects automatically the initial number of conformers for the sampling
         """
 
-        if len(self.args.metal_atoms) >= 1:
-            if len(self.args.metal_idx) > 0:
-                self.args.auto_sample = (
-                    self.args.auto_sample * 3 * len(self.args.metal_idx)
-                )  # this accounts for possible trans/cis isomers in metal complexes
         auto_samples = 0
+        # low: good for descriptor generation in machine learning
+        if self.args.auto_sample.lower() == 'low':
+            sampling_factor = 5
+            max_confs = 100
+        # mid: standard, good compromise between number of conformers and computing time
+        elif self.args.auto_sample.lower() == 'mid':
+            sampling_factor = 10
+            max_confs = 250
+        # high: more demanding method, more conformers and time
+        elif self.args.auto_sample.lower() == 'high':
+            sampling_factor = 20
+            max_confs = 500
+        else:
+            self.args.log.write(f'x  {self.args.auto_sample} is not a valid option for --auto_sample! Please use "low", "mid" or "high"')
+            self.args.log.finalize()
+            sys.exit()
+
+        if len(metal_atoms) >= 1:
+            if len(metal_idx) > 0:
+                auto_samples += 3 * len(metal_idx) # this accounts for possible trans/cis isomers in metal complexes
+
         auto_samples += 3 * (Lipinski.NumRotatableBonds(mol))  # x3, for C3 rotations
         auto_samples += 3 * (Lipinski.NHOHCount(mol))  # x3, for OH/NH rotations
-        auto_samples += 3 * (
-            Lipinski.NumSaturatedRings(mol)
-        )  # x3, for boat/chair/envelope confs
+        auto_samples += 3 * (Lipinski.NumSaturatedRings(mol))  # x3, for boat/chair/envelope confs
         if auto_samples == 0:
-            auto_samples = self.args.auto_sample
+            auto_samples = sampling_factor
         else:
-            auto_samples = self.args.auto_sample * auto_samples
+            auto_samples = sampling_factor * auto_samples
+
+        # set a maximum number of conformers allowed with auto_sampling
+        if auto_samples > max_confs:
+            auto_samples = max_confs
+
         return auto_samples
 
     def genConformer_r(
@@ -1061,14 +991,18 @@ class csearch:
         conf,
         i,
         matches,
-        sdwriter,
         name,
+        sdwriter,
         update_to_rdkit,
         coord_Map,
         alg_Map,
         mol_template,
         original_atn,
-        geom
+        geom,
+        metal_atoms,
+        metal_idx,
+        metal_sym,
+        ff
     ):
         """
         If program = RDKit, this replaces iodine back to the metal (if needed) 
@@ -1077,51 +1011,44 @@ class csearch:
         """
 
         if i >= len(matches):  # base case, torsions should be set in conf
-            if len(self.args.metal_atoms) >= 1 and (
-                self.args.program.lower() in ["rdkit","crest"] or update_to_rdkit
-            ):
-                if coord_Map is None and alg_Map is None and mol_template is None:
-                    energy = minimize_rdkit_energy(
-                        mol,
-                        conf,
-                        self.args.log,
-                        self.args.ff,
-                        self.args.opt_steps_rdkit,
-                    )
-                else:
-                    mol, energy = realign_mol(
-                        mol,
-                        conf,
-                        coord_Map,
-                        alg_Map,
-                        mol_template,
-                        self.args.opt_steps_rdkit,
-                    )
-                mol.SetProp("Energy", str(energy))
+            if len(metal_atoms) >= 1:
+                if self.args.program.lower() in ["rdkit","crest"] or update_to_rdkit:
+                    if coord_Map is None and alg_Map is None and mol_template is None:
+                        energy = minimize_rdkit_energy(
+                            mol,
+                            conf,
+                            self.args.log,
+                            ff,
+                            self.args.opt_steps_rdkit,
+                        )
+                    else:
+                        mol, energy = realign_mol(
+                            mol,
+                            conf,
+                            coord_Map,
+                            alg_Map,
+                            mol_template,
+                            self.args.opt_steps_rdkit,
+                        )
+                    mol.SetProp("Energy", str(energy))
 
-                # setting the metal back instead of I
-                set_metal_atomic_number(mol, self.args.metal_idx, self.args.metal_sym)
+                    # setting the metal back instead of I
+                    set_metal_atomic_number(mol, metal_idx, metal_sym)
 
-                # setting the problematic As atoms back when using the Ir_squareplanar geometry rule
-                if geom == ['Ir_squareplanar']:
-                    if original_atn is not None:
-                        mol.GetAtomWithIdx(original_atn[1]).SetAtomicNum(original_atn[0])
+                    # setting the problematic As atoms back when using the Ir_squareplanar geometry rule
+                    if geom == ['Ir_squareplanar']:
+                        if original_atn is not None:
+                            mol.GetAtomWithIdx(original_atn[1]).SetAtomicNum(original_atn[0])
             
-            # if CREST is used, this RDKit preoptimzed mol object will be employed to initializethe the trajectories
-            if self.args.program.lower() in ["crest"]:
-                return mol
-            else:
-                try:
-                    sdwriter.write(mol, conf)
-                except (TypeError):
-                    raise
-                return 1
+            sdwriter.write(mol, conf)
+            return 1
 
         elif self.args.program.lower() in ["crest"]:
             # setting the metal back instead of I
-            set_metal_atomic_number(mol, self.args.metal_idx, self.args.metal_sym)
+            set_metal_atomic_number(mol, metal_idx, metal_sym)
+            sdwriter.write(mol, conf)
 
-            return mol
+            return 1
 
         # when SUMM is selected, this cycle generates conformers based on rotation of dihedral angles
         total = 0
@@ -1137,25 +1064,29 @@ class csearch:
                 conf,
                 i + 1,
                 matches,
-                sdwriter,
                 name,
+                sdwriter,
                 update_to_rdkit,
                 coord_Map,
                 alg_Map,
                 mol_template,
                 original_atn,
-                geom
+                geom,
+                metal_atoms,
+                metal_idx,
+                metal_sym,
+                ff
             )
             deg += int(self.args.degree)
 
         return total
 
-    def embed_conf(self, mol, initial_confs, coord_Map, alg_Map, mol_template):
+    def embed_conf(self, mol, initial_confs, coord_Map, alg_Map, mol_template, csearch_nprocs, name):
         """
         Function to embed conformers
         """
 
-        is_sdf_mol_or_mol2 = os.path.basename(Path(self.args.input)).split('.')[1].lower() in [
+        is_sdf_mol_or_mol2 = os.path.basename(Path(self.args.input)).split('.')[-1].lower() in [
             "sdf",
             "mol",
             "mol2",
@@ -1167,18 +1098,18 @@ class csearch:
         embed_kwargs = dict()
         embed_kwargs["ignoreSmoothingFailures"] = True
         embed_kwargs["randomSeed"] = self.args.seed
-        embed_kwargs["numThreads"] = 0
+        embed_kwargs["numThreads"] = csearch_nprocs
 
         if (coord_Map, alg_Map, mol_template) != (None, None, None):
             embed_kwargs["coordMap"] = coord_Map
         cids = rdDistGeom.EmbedMultipleConfs(mol, initial_confs, **embed_kwargs)
 
         if len(cids) <= 1 and initial_confs != 1:
-            self.args.log.write(f"\nx  Normal RDKit embeding process failed, trying to generate conformers with random coordinates (with {str(initial_confs)} possibilities)")
+            self.args.log.write(f"\nx  Normal RDKit embeding process failed, trying to generate conformers with random coordinates (with {str(initial_confs)} possibilities) ({os.path.basename(Path(name))})")
             embed_kwargs["useRandomCoords"] = True
             embed_kwargs["boxSizeMult"] = 10.0
             embed_kwargs["numZeroFail"] = 1000
-            embed_kwargs["numThreads"] = 0
+            embed_kwargs["numThreads"] = csearch_nprocs
             cids = rdDistGeom.EmbedMultipleConfs(mol, initial_confs, **embed_kwargs)
 
         if is_sdf_mol_or_mol2:
@@ -1188,7 +1119,8 @@ class csearch:
 
         return cids
 
-    def min_and_E_calc(self, mol, cids, coord_Map, alg_Map, mol_template, ff, geom):
+    def min_and_E_calc(self, mol, cids, coord_Map, alg_Map, mol_template, 
+                       ff, geom, metal_atoms, metal_idx, metal_sym):
         """
         Minimization and E calculation with RDKit after embeding
         """
@@ -1213,8 +1145,8 @@ class csearch:
             # removes geometries that do not pass the filters (geom option)
             mol_geom = Chem.Mol(mol)
             # setting the metal back instead of I
-            if len(self.args.metal_atoms) >= 1:
-                set_metal_atomic_number(mol_geom, self.args.metal_idx, self.args.metal_sym)
+            if len(metal_atoms) >= 1:
+                set_metal_atomic_number(mol_geom, metal_idx, metal_sym)
 
             passing_geom = geom_filter(self,mol_geom,geom)
             if passing_geom:
@@ -1229,10 +1161,8 @@ class csearch:
         mol,
         cids,
         name,
+        csearch_file,
         rotmatches,
-        dup_data,
-        dup_data_idx,
-        sdwriter,
         update_to_rdkit,
         coord_Map,
         alg_Map,
@@ -1242,7 +1172,10 @@ class csearch:
         ff,
         smi,
         geom,
-        original_atn
+        original_atn,
+        metal_atoms,
+        metal_idx,
+        metal_sym
     ):
         """
         Minimizes, gets the energy and filters RDKit conformers after embeding
@@ -1250,14 +1183,10 @@ class csearch:
 
         # gets optimized mol objects and energies
         if geom != []:
-            self.args.log.write(f"o  Applying geometry filters ({geom})")
+            self.args.log.write(f"o  Applying geometry filters ({geom}) ({os.path.basename(Path(name))})")
         outmols, cenergy = self.min_and_E_calc(
-            mol, cids, coord_Map, alg_Map, mol_template, ff, geom
+            mol, cids, coord_Map, alg_Map, mol_template, ff, geom, metal_atoms, metal_idx, metal_sym
         )
-
-        # writing charges and multiplicity after RDKit
-        dup_data.at[dup_data_idx, "Mult"] = mult
-        dup_data.at[dup_data_idx, "Real charge"] = charge
 
         for i, cid in enumerate(cids):
             outmols[cid].SetProp("_Name", name + " " + str(i + 1))
@@ -1270,87 +1199,55 @@ class csearch:
         cids = list(range(len(outmols)))
         sorted_all_cids = sorted(cids, key=lambda cid: cenergy[cid])
 
-        self.args.log.write("\no  Applying filters to initial conformers")
-
-        # filter based on energy window ewin_csearch
-        sortedcids_rdkit = ewin_filter(
-            sorted_all_cids,
-            cenergy,
-            dup_data,
-            dup_data_idx,
-            "rdkit",
-            self.args.ewin_csearch,
-        )
-
-        # pre-filter based on energy only
-        selectedcids_initial_rdkit = pre_E_filter(
-            sortedcids_rdkit,
-            cenergy,
-            dup_data,
-            dup_data_idx,
-            "rdkit",
-            self.args.initial_energy_threshold,
-        )
-
-        # filter based on energy and RMSD
-        selectedcids_rdkit = RMSD_and_E_filter(
-            outmols,
-            selectedcids_initial_rdkit,
-            cenergy,
-            self.args,
-            dup_data,
-            dup_data_idx,
-            "rdkit",
-        )
+        self.args.log.write(f"\no  Applying filters to initial conformers ({os.path.basename(Path(name))})")
+        selectedcids_rdkit = conformer_filters(self,sorted_all_cids,cenergy,outmols)
 
         if self.args.program.lower() in ["summ", "rdkit", "crest"]:
+            sdwriter_summ = Chem.SDWriter(f'{csearch_file}')            
             # now exhaustively drive torsions of selected conformers
             total = 0
+            sdwriter = Chem.SDWriter(f'{csearch_file}')
             for conf in selectedcids_rdkit:
                 if self.args.program.lower() == "summ" and not update_to_rdkit:
-                    sdwriter.write(outmols[conf], conf)
+                    sdwriter_summ.write(outmols[conf], conf)
                     for m in rotmatches:
                         rdMolTransforms.SetDihedralDeg(
                             outmols[conf].GetConformer(conf), *m, 180.0
                         )
-                if self.args.program.lower() in ["summ", "rdkit"]:
+
+                if self.args.program.lower() in ["summ", "rdkit", "crest"]:
                     total += self.genConformer_r(
                         outmols[conf],
                         conf,
                         0,
                         rotmatches,
-                        sdwriter,
                         outmols[conf].GetProp("_Name"),
+                        sdwriter,
                         update_to_rdkit,
                         coord_Map,
                         alg_Map,
                         mol_template,
                         original_atn,
-                        geom
+                        geom,
+                        metal_atoms,
+                        metal_idx,
+                        metal_sym,
+                        ff
                     )
-                elif self.args.program.lower() in ["crest"]:
-                    mol = self.genConformer_r(
-                        outmols[conf],
-                        conf,
-                        0,
-                        rotmatches,
-                        sdwriter,
-                        outmols[conf].GetProp("_Name"),
-                        update_to_rdkit,
-                        coord_Map,
-                        alg_Map,
-                        mol_template,
-                        original_atn,
-                        geom
-                    )
-                    outmols = [mol]
-                    break
 
+            sdwriter.close()
+            sdwriter_summ.close()
             status = 1
 
-        if self.args.program.lower() == "summ":
-            dup_data.at[dup_data_idx, "summ-conformers"] = total
-
+        # keep only structurally different conformers
+        if self.args.program.lower() in ["rdkit","crest"]:
+            suppl, _, _, _ = mol_from_sdf_or_mol_or_mol2(f'{csearch_file}', "csearch", self.args)
+            if len(suppl) > self.args.sample and self.args.auto_cluster:
+                cluster_mols_sorted = cluster_conformers(self,suppl,"rdkit",csearch_file,name)
+                outmols = cluster_mols_sorted
+            else:
+                outmols = suppl
+        
         if self.args.program.lower() == "fullmonte":
             status = generating_conformations_fullmonte(
                 name,
@@ -1358,13 +1255,14 @@ class csearch:
                 rotmatches,
                 selectedcids_rdkit,
                 outmols,
-                sdwriter,
-                dup_data,
-                dup_data_idx,
+                csearch_file,
                 coord_Map,
                 alg_Map,
                 mol_template,
                 ff,
+                metal_atoms,
+                metal_idx, 
+                metal_sym
             )
             # removes the rdkit file
             os.remove(name + "_" + "rdkit" + self.args.output)
@@ -1375,9 +1273,7 @@ class csearch:
         self,
         mol,
         name,
-        dup_data,
-        dup_data_idx,
-        sdwriter,
+        csearch_file,
         charge,
         mult,
         coord_Map,
@@ -1385,7 +1281,11 @@ class csearch:
         mol_template,
         smi,
         geom,
-        original_atn
+        original_atn,
+        metal_atoms,
+        metal_idx,
+        metal_sym,
+        csearch_nprocs
     ):
 
         """
@@ -1395,14 +1295,10 @@ class csearch:
         mol.SetProp("_Name", name)
 
         # detects and applies auto-detection of initial number of conformers
-        if self.args.program.lower() in ['crest']:
-            # CREST only uses the most stable conformer from RDKit,
-            # and initial_confs can be low to speed up the process
-            initial_confs = self.args.auto_sample
-        elif self.args.sample == "auto":
-            initial_confs = int(self.auto_sampling(mol))
+        if self.args.auto_sample:
+            initial_confs = int(self.auto_sampling(mol,metal_atoms,metal_idx))
         else:
-            initial_confs = int(self.args.sample)
+            initial_confs = self.args.sample
 
         update_to_rdkit = False
 
@@ -1412,33 +1308,31 @@ class csearch:
             self.args.log.write(f"\nx  Too many torsions ({len(rotmatches)}). Skipping {name + self.args.output}")
         elif self.args.program.lower() == "summ" and len(rotmatches) == 0:
             update_to_rdkit = True
-            self.args.log.write("\nx  No rotatable dihedral found. Updating to CSEARCH to RDKit, writing to SUMM SDF")
+            self.args.log.write(f"\nx  No rotatable dihedral found. Updating to CSEARCH to RDKit, writing to SUMM SDF ({os.path.basename(Path(name))})")
         elif self.args.program.lower() == "fullmonte" and len(rotmatches) == 0:
             update_to_rdkit = True
-            self.args.log.write("\nx  No rotatable dihedral found. Updating to CSEARCH to RDKit, writing to FULLMONTE SDF")
+            self.args.log.write(f"\nx  No rotatable dihedral found. Updating to CSEARCH to RDKit, writing to FULLMONTE SDF ({os.path.basename(Path(name))})")
 
         ff = self.args.ff
-        dup_data.at[dup_data_idx, "RDKit-Initial-samples"] = initial_confs
         if self.args.program.lower() == "rdkit":
             rotmatches = []
-        cids = self.embed_conf(mol, initial_confs, coord_Map, alg_Map, mol_template)
+        cids = self.embed_conf(mol, initial_confs, coord_Map, alg_Map, mol_template, csearch_nprocs, name)
 
         # energy minimize all to get more realistic results
         # identify the atoms and decide Force Field
         for atom in mol.GetAtoms():
             if atom.GetAtomicNum() > 36 and self.args.ff == "MMFF":  # up to Kr for MMFF, if not the code will use UFF
-                self.args.log.write(f"\nx  {self.args.ff} is not compatible with the molecule, changing to UFF")
+                self.args.log.write(f"\nx  {self.args.ff} is not compatible with the molecule, changing to UFF (({os.path.basename(Path(name))}))")
                 ff = "UFF"
+                break
 
         try:
             status, mol_crest = self.min_after_embed(
                 mol,
                 cids,
                 name,
+                csearch_file,
                 rotmatches,
-                dup_data,
-                dup_data_idx,
-                sdwriter,
                 update_to_rdkit,
                 coord_Map,
                 alg_Map,
@@ -1448,15 +1342,13 @@ class csearch:
                 ff,
                 smi,
                 geom,
-                original_atn
+                original_atn,
+                metal_atoms,
+                metal_idx,
+                metal_sym
             )
         except IndexError:
             status = -1
             mol_crest = None
-
-        if self.args.crest_nrun != 1 and self.args.program.lower() =='crest':
-            pass
-        else:
-            sdwriter.close()
 
         return status, rotmatches, ff, mol_crest

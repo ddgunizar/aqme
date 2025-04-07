@@ -41,7 +41,7 @@ Parameters
       %oldchk=root/user/FILENAME.chk
    mem : str, default='4GB'
       Memory for the QM calculations (i) Gaussian: total memory; (ii) ORCA: memory per processor
-   nprocs : int, default=2
+   nprocs : int, default=None
       Number of processors used in the QM calculations
    gen_atoms : list of str, default=[]
       Atoms included in the gen(ECP) basis set (i.e. ['I','Pd'])
@@ -79,7 +79,9 @@ from aqme.utils import (
     read_xyz_charge_mult,
     mol_from_sdf_or_mol_or_mol2,
     add_prefix_suffix,
-    check_files
+    check_files,
+    check_dependencies,
+    set_destination
 )
 
 from aqme.csearch.crest import xyzall_2_xyz
@@ -96,13 +98,17 @@ class qprep:
     def __init__(self, create_dat=True, **kwargs):
 
         start_time_overall = time.time()
+
         # load default and user-specified variables
         self.args = load_variables(kwargs, "qprep", create_dat=create_dat)
+
+        # check whether dependencies are installed
+        _ = check_dependencies(self)
 
         # retrieves the different files to run in QPREP
         _ = check_files(self,'qprep')
 
-        file_format = os.path.basename(Path(self.args.files[0])).split('.')[1]
+        file_format = os.path.basename(Path(self.args.files[0])).split('.')[-1]
         if file_format.lower() not in ['sdf', 'xyz', 'pdb', 'log', 'out', 'json']:
             self.args.log.write(f"\nx  The format used ({file_format}) is not compatible with QPREP! Formats accepted: sdf, xyz, pdb, log, out, json")
             self.args.log.finalize()
@@ -119,12 +125,11 @@ class qprep:
             self.args.log.finalize()
             sys.exit()
 
-        if self.args.destination is None:
-            destination = self.args.initial_dir.joinpath("QCALC")
-        elif self.args.initial_dir.joinpath(self.args.destination).exists():
-            destination = Path(self.args.initial_dir.joinpath(self.args.destination))
-        else:
-            destination = Path(self.args.destination)
+        # set number of processors
+        if self.args.nprocs is None:
+            self.args.nprocs = 8
+
+        destination = set_destination(self,'QCALC')
 
         # check if qm_input is not empty
         if self.args.qm_input == "" and create_dat:
@@ -134,7 +139,7 @@ class qprep:
 
         # check if functionals and basis sets used are correct
         # so far, it only works for Gaussian
-        if self.args.program.lower() == 'gaussian':
+        if self.args.program.lower() == 'gaussian' and create_dat:
             _ = self.check_level_of_theory()
 
         # checks for gen/genecp

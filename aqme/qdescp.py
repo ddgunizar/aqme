@@ -112,12 +112,12 @@ from aqme.qdescp_utils import (
     read_fod,
     read_json,
     read_xtb,
-    read_ptb,
     read_wbo,
     calculate_local_CDFT_descriptors,
     calculate_global_CDFT_descriptors,
     calculate_global_morfeus_descriptors,
     calculate_local_morfeus_descriptors,
+    calculate_xTB_morfeus_descriptors,
     collect_descp_lists,
     get_boltz_props_nmr,
     fix_cols_names,
@@ -1027,8 +1027,8 @@ class qdescp:
         xtb_collected_props['properties_FOD'] = read_fod(xtb_files_props['xtb_fod'],self)
         xtb_collected_props['properties_solv'] = read_solv(xtb_files_props['xtb_solv'])
         xtb_collected_props['properties_triplet'] = read_triplet(xtb_files_props['stgap'],xtb_collected_props['properties_sp']['Total energy'])
-        xtb_collected_props['cdft_descriptors']  = calculate_global_CDFT_descriptors(xtb_files_props['xtb_out'], xtb_files_props['xtb_Nminus1'], xtb_files_props['xtb_Nminus2'], xtb_files_props['xtb_Nplus1'], xtb_files_props['xtb_Nplus2'],self)
-        xtb_collected_props['localDescriptors'] = calculate_local_CDFT_descriptors(self, xtb_files_props['xtb_fukui_N'], xtb_files_props['xtb_fukui_Nplus1'], xtb_files_props['xtb_fukui_Nminus1'], xtb_collected_props['cdft_descriptors'])
+        xtb_collected_props['cdft_descriptors']  = calculate_global_CDFT_descriptors(self, xtb_files_props['xtb_out'], xtb_files_props['xtb_Nminus1'], xtb_files_props['xtb_Nminus2'], xtb_files_props['xtb_Nplus1'], xtb_files_props['xtb_Nplus2'], xtb_collected_props['xtb_morfeus_descriptors'])
+        xtb_collected_props['localDescriptors'] = calculate_local_CDFT_descriptors(self, xtb_files_props['xtb_fukui_N'], xtb_files_props['xtb_fukui_Nplus1'], xtb_files_props['xtb_fukui_Nminus1'], xtb_collected_props['cdft_descriptors'], xtb_collected_props['xtb_morfeus_descriptors'])
 
         # create matrix of Wiberg bond-orders
         bonds, wbos = read_wbo(xtb_files_props['xtb_wbo'],self)
@@ -1066,6 +1066,10 @@ class qdescp:
         # Local descriptors
         local_properties_morfeus = calculate_local_morfeus_descriptors(xtb_files_props['xtb_xyz_path'],self)
         json_data.update(local_properties_morfeus)
+
+        # xTB descriptors
+        xtb_properties_morfeus = calculate_xTB_morfeus_descriptors(self, xtb_files_props['xtb_xyz_path'],bond_pairs=None)
+        json_data.update(xtb_properties_morfeus)
 
         return json_data
 

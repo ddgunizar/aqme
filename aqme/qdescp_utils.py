@@ -9,13 +9,14 @@ import numpy as np
 import pandas as pd
 import ast
 import math
+import numbers
 import rdkit
 from rdkit import Chem
 from rdkit.Chem import rdFMCS
 from rdkit.Chem import Descriptors
 import warnings
 warnings.filterwarnings('ignore')
-from morfeus import SASA, Dispersion, BuriedVolume, ConeAngle, SolidAngle, Pyramidalization, read_xyz, read_geometry
+from morfeus import SASA, Dispersion, BuriedVolume, ConeAngle, SolidAngle, Pyramidalization, read_xyz, read_geometry, XTB
 from aqme.utils import load_sdf, periodic_table
 
 GAS_CONSTANT = 8.3144621  # J / K / mol
@@ -403,7 +404,7 @@ def read_wbo(file,self):
 
     return bonds, wbos
 
-def calculate_global_CDFT_descriptors(file, file_Nminus1, file_Nminus2, file_Nplus1, file_Nplus2, self):
+def calculate_global_CDFT_descriptors(self, file, file_Nminus1, file_Nminus2, file_Nplus1, file_Nplus2, xtb_morfeus_descriptors):
     """
     It uses the files N, N-1, N+1, N+2 and N-2 to calculate the descriptors created from xTB.
     calculate CDFT descriptors with FDA approximations.
@@ -530,12 +531,12 @@ def calculate_global_CDFT_descriptors(file, file_Nminus1, file_Nminus2, file_Npl
 
     # Return the calculated descriptors
     cdft_descriptors = {
-        "IP": delta_SCC_IP,
-        "EA": delta_SCC_EA,
+        # "IP": delta_SCC_IP,
+        # "EA": delta_SCC_EA,
         "Electrophil. idx": electrophilicity_index,
-        "Hardness": chemical_hardness,
-        "Softness": chemical_softness,
-        "Chem. potential": chemical_potential,
+        # "Hardness": chemical_hardness,
+        # "Softness": chemical_softness,
+        # "Chem. potential": chemical_potential,
         "Electronegativity": mulliken_electronegativity,
         "Electrodon. power idx": electrodonating_power_index,
         "Electroaccep. power idx": electroaccepting_power_index,
@@ -558,7 +559,7 @@ def calculate_global_CDFT_descriptors(file, file_Nminus1, file_Nminus2, file_Npl
 
     return cdft_descriptors
 
-def calculate_local_CDFT_descriptors(self, file_fukui_N, file_fukui_Nplus1, file_fukui_Nminus1, cdft_descriptors):
+def calculate_local_CDFT_descriptors(self, file_fukui_N, file_fukui_Nplus1, file_fukui_Nminus1, cdft_descriptors, xtb_morfeus_descriptors):
     """
     Using the fukui.json files (N, N-1, N+1) extract the PTB-xTB probenetic loads to calculate the descriptor.
     calculate CDFT descriptors with FDA approximations or condensed fukuis.
@@ -608,18 +609,22 @@ def calculate_local_CDFT_descriptors(self, file_fukui_N, file_fukui_Nplus1, file
     Global_hypersoftness = cdft_descriptors.get("Hypersoftness")
     electrophilicity_index = cdft_descriptors.get("Electrophil. idx")
     nucleophilicity_index = cdft_descriptors.get("Nucleophilicity idx")
+    f_pos = xtb_morfeus_descriptors.get("electrophilicity")
+    f_negs = xtb_morfeus_descriptors.get("nucleophilicity")
+    f_rads = xtb_morfeus_descriptors.get("radical")
+    dual_descriptor = xtb_morfeus_descriptors.get("dual")
 
     if None in [chemical_softness, Global_hypersoftness, electrophilicity_index, nucleophilicity_index]:
         self.args.log.write("x  WARNING! Missing required CDFT descriptors (Softness, Hypersoftness, Electrophilicity or Nucleophilicity).\n")
         return None
 
     # Compute Fukui functions
-    f_pos = [round(n - nplus, 4) for n, nplus in zip(chargs_N, chargs_Nplus1)]
-    f_negs = [round(nminus - n, 4) for nminus, n in zip(chargs_Nminus1, chargs_N)]
-    f_rads = [round(nminus - nplus, 4) for nminus, nplus in zip(chargs_Nminus1, chargs_Nplus1)]
+    # f_pos = [round(n - nplus, 4) for n, nplus in zip(chargs_N, chargs_Nplus1)]
+    # f_negs = [round(nminus - n, 4) for nminus, n in zip(chargs_Nminus1, chargs_N)]
+    # f_rads = [round(nminus - nplus, 4) for nminus, nplus in zip(chargs_Nminus1, chargs_Nplus1)]
 
     # Dual descriptor
-    dual_descriptor = [round(f_p - f_n, 6) for f_p, f_n in zip(f_pos, f_negs)]
+    # dual_descriptor = [round(f_p - f_n, 6) for f_p, f_n in zip(f_pos, f_negs)]
 
     # Softness local descriptors
     s_pos = [round(chemical_softness * f_p, 4) for f_p in f_pos]
@@ -634,8 +639,8 @@ def calculate_local_CDFT_descriptors(self, file_fukui_N, file_fukui_Nplus1, file
     Grand_canonical_dual_descriptor = [round(Global_hypersoftness * dual, 6) for dual in dual_descriptor]
 
     # Electrophilicity / Nucleophilicity weighted descriptors
-    w_pos = [round(electrophilicity_index * f_p, 4) for f_p in f_pos]
-    w_negs = [round(electrophilicity_index * f_n, 4) for f_n in f_negs]
+    # w_pos = [round(electrophilicity_index * f_p, 4) for f_p in f_pos]
+    # w_negs = [round(electrophilicity_index * f_n, 4) for f_n in f_negs]
     w_rads = [round(electrophilicity_index * f_r, 4) for f_r in f_rads]
 
     Multiphilic_descriptor = [round(electrophilicity_index * dual, 4) for dual in dual_descriptor]
@@ -646,18 +651,18 @@ def calculate_local_CDFT_descriptors(self, file_fukui_N, file_fukui_Nplus1, file
 
     # Compile results
     localDescriptors = {
-        "fukui+": f_pos,
-        "fukui-": f_negs,
-        "fukui0": f_rads,
-        "dual descrip.": dual_descriptor,
+        # "fukui+": f_pos,
+        # "fukui-": f_negs,
+        # "fukui0": f_rads,
+        # "dual descrip.": dual_descriptor,
         "softness+": s_pos,
         "softness-": s_negs,
         "softness0": s_rads,
         "Rel. nucleophilicity": Relative_nucleophilicity,
         "Rel. electrophilicity": Relative_electrophilicity,
         "GC Dual Descrip.": Grand_canonical_dual_descriptor,
-        "Electrophil.": w_pos,
-        "Nucleophil.": w_negs,
+        # "Electrophil.": w_pos,
+        # "Nucleophil.": w_negs,
         "Radical attack": w_rads,
         "Mult. descrip.": Multiphilic_descriptor,
         "Nu_Electrophil.": Nu_pos,
@@ -765,69 +770,69 @@ def read_xtb(file,self):
     return properties_dict
 
 
-def read_ptb(file,self):
-    """
-    Read xtb.ptb file and return a dictionary of extracted properties.
-    """
+# def read_ptb(file,self):
+#     """
+#     Read xtb.ptb file and return a dictionary of extracted properties.
+#     """
 
-    # Check if the file exists
-    if not os.path.exists(file):
-        self.args.log.write(f"x  WARNING! The file {file} does not exist.")
-        return None
+#     # Check if the file exists
+#     if not os.path.exists(file):
+#         self.args.log.write(f"x  WARNING! The file {file} does not exist.")
+#         return None
 
-    with open(file, "r") as f:
-        data = f.readlines()
+#     with open(file, "r") as f:
+#         data = f.readlines()
 
-    # Initialize variables
-    homo_lumo, homo, lumo = np.nan, np.nan, np.nan
-    dipole_module = np.nan
-    atom_dipoles, chrgs = [], []
+#     # Initialize variables
+#     homo_lumo, homo, lumo = np.nan, np.nan, np.nan
+#     dipole_module = np.nan
+#     atom_dipoles, chrgs = [], []
 
-    # Parsing file data
-    for i, line in enumerate(data):
-        if "(HOMO)" in line:
-            if data[i].split()[3] != "(HOMO)":
-                homo = round(float(data[i].split()[3]), 4)
-            else:
-                homo = round(float(data[i].split()[2]), 4)
-        elif "(LUMO)" in line:
-            if data[i].split()[3] != "(LUMO)":
-                lumo = round(float(data[i].split()[3]), 4)
-            else:
-                lumo = round(float(data[i].split()[2]), 4)
-        elif "Total dipole moment" in line:
-            dipole_module = float(data[i + 1].split()[-1])
+#     # Parsing file data
+#     for i, line in enumerate(data):
+#         if "(HOMO)" in line:
+#             if data[i].split()[3] != "(HOMO)":
+#                 homo = round(float(data[i].split()[3]), 4)
+#             else:
+#                 homo = round(float(data[i].split()[2]), 4)
+#         elif "(LUMO)" in line:
+#             if data[i].split()[3] != "(LUMO)":
+#                 lumo = round(float(data[i].split()[3]), 4)
+#             else:
+#                 lumo = round(float(data[i].split()[2]), 4)
+#         elif "Total dipole moment" in line:
+#             dipole_module = float(data[i + 1].split()[-1])
 
-    homo_lumo = round(float(lumo - homo), 4)
+#     homo_lumo = round(float(lumo - homo), 4)
 
-    ptb_json = str(os.path.dirname(file)) + "/xtbout_ptb.json"
-    if os.path.exists(ptb_json):
-        # this part fixes a bug in xTB v1.7.1 when creating the json files
-        with open(ptb_json, 'r', encoding='utf-8') as file:
-            lines = file.readlines()
+#     ptb_json = str(os.path.dirname(file)) + "/xtbout_ptb.json"
+#     if os.path.exists(ptb_json):
+#         # this part fixes a bug in xTB v1.7.1 when creating the json files
+#         with open(ptb_json, 'r', encoding='utf-8') as file:
+#             lines = file.readlines()
 
-        # Remove empty lines at the end of the file
-        with open(ptb_json, 'w') as file:
-            for line in lines:
-                if line.rstrip('\n') != ',':
-                    file.write(line)
+#         # Remove empty lines at the end of the file
+#         with open(ptb_json, 'w') as file:
+#             for line in lines:
+#                 if line.rstrip('\n') != ',':
+#                     file.write(line)
 
-        json_data = read_json(ptb_json)
-        chrgs = json_data['partial charges']
-        for dip_vector in json_data['atomic dipole moments']:
-            atom_dipoles.append(math.sqrt(sum(pow(element, 2) for element in np.array(dip_vector))))
-        os.remove(ptb_json)
+#         json_data = read_json(ptb_json)
+#         chrgs = json_data['partial charges']
+#         for dip_vector in json_data['atomic dipole moments']:
+#             atom_dipoles.append(math.sqrt(sum(pow(element, 2) for element in np.array(dip_vector))))
+#         os.remove(ptb_json)
 
-    properties_dict = {
-        "HOMO-LUMO gap": homo_lumo,
-        "HOMO": homo,
-        "LUMO": lumo,
-        "Partial charge": chrgs,
-        "Dipole module": dipole_module,
-        "Dipole moment": atom_dipoles,
-    }
+#     properties_dict = {
+#         "HOMO-LUMO gap": homo_lumo,
+#         "HOMO": homo,
+#         "LUMO": lumo,
+#         "Partial charge": chrgs,
+#         "Dipole module": dipole_module,
+#         "Dipole moment": atom_dipoles,
+#     }
 
-    return properties_dict
+#     return properties_dict
 
 
 def read_fod(file,self):
@@ -901,8 +906,8 @@ def read_fod(file,self):
 
     # Create a dictionary to hold all the extracted FOD properties
     properties_FOD = {
-        "Total FOD": total_fod,  # The total FOD value extracted from above
-        "FOD": fod,  # List of FOD values for individual atoms
+        # "Total FOD": total_fod,  # The total FOD value extracted from above
+        # "FOD": fod,  # List of FOD values for individual atoms
         "FOD s proportion": s_prop_fod,  # List of s proportion values
         "FOD p proportion": p_prop_fod,  # List of p proportion values
         "FOD d proportion": d_prop_fod,  # List of d proportion values
@@ -972,9 +977,9 @@ def read_solv(file_solv):
                 h_bond.append(0.0)
 
     properties_dict = {
-        "G solv. in H2O": g_solv,
-        "G of H-bonds H2O": g_hb,
-        "G solv. elec.": g_elec,
+        # "G solv. in H2O": g_solv,
+        # "G of H-bonds H2O": g_hb,
+        # "G solv. elec.": g_elec,
         "G solv. SASA": g_sasa,
         "G solv. shift": g_shift,
         "Born radii": born_rad, 
@@ -1289,17 +1294,13 @@ def load_file_formats():
     '''
     
     file_formats = {'_opt.out': 'Optimization',
-                    '.ptb': 'PTB',
                     '.out': 'Single-point (N)',
-                    '.fod': 'FOD',
-                    '.fukui_N': 'Fukui(N)', 
-                    '.fukui_Nminus1': 'Fukui(N-1)',
-                    '.fukui_Nplus1': 'Fukui(N+1)',
                     '.Nminus1': 'E(N-1)',
                     '.Nminus2': 'E(N-2)',
                     '.Nplus1': 'E(N+1)',
                     '.Nplus2': 'E(N+2)',
                     '.wbo': 'WBO',
+                    '.fod': 'FOD',
                     '.solv': 'Solvation in H2O',
                     '.stgap': 'S0-T1 (or T1-S0) gap',                    
                     }
@@ -1652,3 +1653,225 @@ def update_atom_props_json(sorted_indices,match_names,atom_props,json_data,prefi
                 prefixes_atom_prop.append(f'{pattern}_min_')
 
     return prefixes_atom_prop, json_data
+
+def calculate_xTB_morfeus_descriptors(self, final_xyz_path, bond_pairs=None):
+    """
+    Calculate electronic and energetic descriptors using the XTB package in three phases:
+        1) GFN2      :general descriptors + Fukui (no solvent)
+        2) Solvation  :solvation descriptors
+        3) xTB-PTB    :ptb descriptors (energies in eV, dipoles in Debye)
+    Returns a flat dict with all properties, rounded to 4 decimal places.
+    """
+    def _round(v):
+        if isinstance(v, numbers.Number):
+            return round(v, 4)
+        if isinstance(v, list):
+            return [_round(x) for x in v]
+        if isinstance(v, dict):
+            return {k: _round(val) for k, val in v.items()}
+        return v
+
+    # ——————————————————————————————————————
+    # 0) Initialize containers
+    # ——————————————————————————————————————
+    props = {
+        "charges": None,
+        "bond_orders": None,
+        "bond_order": None,  # single-pair shortcut
+        "atom_polarizabilities": None,
+        "molecular_polarizability": None,
+        "FOD": None,
+        "Total FOD": None,
+        "IP": None,
+        "EA": None,
+        "Chem. potential": None,
+        "hardness": None,
+        "softness": None,
+        "G solv. in H2O": None,
+        "solvation_hbond_correction": None,
+        "atom_solvation_hbond_strengths": None,
+        "HOMO": None,
+        "LUMO": None,
+        "HOMO-LUMO gap": None,
+        "dipole moment": None,
+        "atom dipole moments": None,
+    }
+    # placeholders
+    bond_pair_orders   = {}
+    local_descriptors  = {}
+    global_descriptors = {}
+
+    # ——————————————————————————————————————
+    # 1) Read geometry
+    # ——————————————————————————————————————
+    try:
+        elements, coordinates = read_xyz(final_xyz_path)
+        elements, coordinates = read_geometry(final_xyz_path)
+    except Exception as e:
+        self.args.log.write(f"x  WARNING! Error loading {final_xyz_path}: {e}\n")
+        return {}
+
+    # ——————————————————————————————————————
+    # 2) GFN2: core + Fukui (no solvent)
+    # ——————————————————————————————————————
+    try:
+        xtb = XTB(elements, coordinates, method=2)
+    except Exception as e:
+        self.args.log.write(f"x  WARNING! Error initializing GFN2: {e}\n")
+        return {}
+
+    # Core descriptors
+    for method_name, key in [
+        ('get_charges',               'charges'),
+        ('get_atom_polarizabilities', 'atom_polarizabilities'),
+        ('get_molecular_polarizability','molecular_polarizability'),
+        ('get_fod_population',        'FOD'),
+        ('get_nfod',                  'Total FOD'),
+        ('get_ip',                    'ionization_potential (IP)'),
+        ('get_ea',                    'electron_affinity (EA)'),
+        ('get_chemical_potential',    'chemical_potential'),
+        ('get_hardness',              'hardness'),
+        ('get_softness',              'softness'),
+    ]:
+        try:
+            props[key] = getattr(xtb, method_name)()
+        except:
+            props[key] = None
+
+    # ——————————————————————————————————————
+    # Bond orders
+    # ——————————————————————————————————————
+    # 2a) Global map of all bond orders
+    try:
+        props["bond_orders"] = xtb.get_bond_orders()
+    except Exception as e:
+        props["bond_orders"] = None
+        self.args.log.write(f"x  WARNING! get_bond_orders() failed: {e}\n")
+
+    # 2b) Individual bond_order for requested pairs
+    props["bond_order"] = None
+    if bond_pairs:
+        for i, j in bond_pairs:
+            try:
+                bo = round(xtb.get_bond_order(i, j), 4)
+                bond_pair_orders[(i, j)] = bo
+                # if only one pair requested, also expose it under "bond_order"
+                props["bond_order"] = bo
+            except ValueError as e:
+                bond_pair_orders[(i, j)] = None
+                self.args.log.write(f"x  WARNING! {e}\n")
+
+    props["bond_pair_orders"] = bond_pair_orders
+
+    # Fukui indices (local)
+    for mode in ["local_nucleophilicity", "local_electrophilicity"]:
+        try:
+            local_descriptors[mode] = xtb.get_fukui(mode)
+        except Exception as e:
+            self.args.log.write(f"x  WARNING! get_local_descriptors('{mode}') failed: {e}\n")
+
+    # Fukui indices (global via get_fukui)
+    for mode in ["nucleophilicity", "electrophilicity", "radical", "dual"]:
+        try:
+            global_descriptors[mode] = xtb.get_fukui(mode)
+        except Exception as e:
+            self.args.log.write(f"x  WARNING! get_local_descriptors('{mode}') failed: {e}\n")
+
+    # Additional global descriptors
+    for mode in ["nucleofugality", "electrofugality"]:
+        try:
+            global_descriptors[mode] = xtb.get_global_descriptor(mode)
+        except Exception as e:
+            self.args.log.write(f"x  WARNING! get_global_descriptor('{mode}') failed: {e}\n")
+
+    # ——————————————————————————————————————
+    # 3) Solvation: explicit warnings
+    # ——————————————————————————————————————
+    try:
+        xtb_sol = XTB(elements, coordinates, method=2, solvent="water")
+    except Exception as e:
+        self.args.log.write(f"x  WARNING! Error initializing Solvation XTB: {e}\n")
+        return {}
+
+    for method_name, key in [
+        ('get_solvation_energy',               'G solv. in H2O'),
+        ('get_solvation_h_bond_correction',    'G of H-bonds H2O'),
+        ('get_atom_solvation_h_bond_strengths','G solv. elec.'),
+    ]:
+        try:
+            props[key] = _round(getattr(xtb_sol, method_name)())
+        except Exception as e:
+            self.args.log.write(f"x  WARNING! {method_name}() failed: {e}\n")
+            props[key] = None
+
+    # ——————————————————————————————————————
+    # 4) xTB-PTB: HOMO/LUMO & dipoles in Debye
+    # ——————————————————————————————————————
+    try:
+        xtb_ptb = XTB(elements, coordinates, method="ptb")
+    except Exception as e:
+        self.args.log.write(f"x  WARNING! Error initializing xTB-PTB: {e}\n")
+        xtb_ptb = None
+
+    if xtb_ptb:
+        try:
+            props["HOMO"]          = xtb_ptb.get_homo(unit="eV")
+            props["LUMO"]          = xtb_ptb.get_lumo(unit="eV")
+            props["HOMO-LUMO"] = props["LUMO"] - props["HOMO"]
+        except Exception as e:
+            self.args.log.write(f"x  WARNING! Error fetching HOMO/LUMO: {e}\n")
+            props["HOMO"] = props["LUMO"] = props["HOMO-LUMO gap"] = None
+
+
+        try:
+            props["dipole moment"] = xtb_ptb.get_dipole_moment(unit="debye")
+        except Exception as e:
+            self.args.log.write(f"x  WARNING! Error fetching molecular dipole moment: {e}\n")
+            props["dipole moment"] = None
+
+
+        try:
+            props["atom dipole moments"] = xtb_ptb.get_atom_dipole_moments(unit="debye")
+        except Exception as e:
+            self.args.log.write(f"x  WARNING! Error fetching atomic dipole moments: {e}\n")
+            props["atom dipole moments"] = None
+    else:
+        for key in [
+            "HOMO", "LUMO", "HOMO-LUMO gap",
+            "dipole moment", "atom dipole moments"
+        ]:
+            props[key] = None
+
+    # ——————————————————————————————————————
+    # 5) Package and return
+    # ——————————————————————————————————————
+    xtb_morfeus_descriptors = {
+        "charges"                         : props["Partial charge"],
+        "bond orders (all)"               : props["bond_orders"],
+        "bond order (for pair)"           : props["bond_order"],
+        "atom polarizabilities"           : props["atom_polarizabilities"],
+        "molecular polarizability"        : props["molecular_polarizability"],
+        "FOD population"                  : props["FOD"],
+        "NFOD"                            : props["Total FOD"],
+        "ionization potential (IP)"       : props["IP"],
+        "electron affinity (EA)"          : props["EA"],
+        "chemical potential"              : props["Chem. potential"],
+        "hardness"                        : props["Hardness"],
+        "softness"                        : props["Softness"],
+        "solvation energy"                : props["G solv. in H2O"],
+        "solvation H-bond correction"     : props["G of H-bonds H2O"],
+        "atom solvation H-bond strengths" : props["G solv. elec."],
+        "HOMO (eV)"                       : props["HOMO"],
+        "LUMO (eV)"                       : props["LUMO"],
+        "HOMO-LUMO gap (eV)"              : props["HOMO-LUMO gap"],
+        "dipole moment (Debye)"           : props["dipole moment (Debye)"],
+        "atom dipole moments (Debye)"     : props["atom dipole moments (Debye)"],
+        "Fukui local indices"             : local_descriptors,
+        "Fukui global indices"            : global_descriptors,
+        "bond orders for requested pairs" : bond_pair_orders,
+    }
+
+    # Finally round everything
+    return {k: _round(v) for k, v in xtb_morfeus_descriptors.items()}
+
+

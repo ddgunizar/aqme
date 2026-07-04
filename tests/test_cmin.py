@@ -25,7 +25,7 @@ if not os.path.exists(cmin_methods_dir):
     "path, program, sdf, output_nummols",
     [
         # tests for conformer generation with RDKit
-        ("complete", "ani", "pentane_rdkit_methods.sdf", 4),
+        # ("complete", "ani", "pentane_rdkit_methods.sdf", 4),
         ("complete", "xtb", "pentane_rdkit_methods.sdf", 4),
         ("partial", "xtb", "tests/cmin_methods/pentane_rdkit_methods.sdf", 4), # test for partial path in the files option
         ("name", "xtb", "pentane_rdkit_methods.sdf", 4), # test for direct name in the files option

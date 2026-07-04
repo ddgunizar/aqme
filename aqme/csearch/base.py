@@ -599,10 +599,17 @@ class csearch:
         """
         try:
             # Unpack job input and store as instance attributes
-            (smi, name, charge, mult, 
-             constraints_atoms, constraints_dist,
-             constraints_angle, constraints_dihedral, 
-             complex_type, geom, sample) = job_input
+            if len(job_input) == 12:
+                (smi, name, charge, mult,
+                 constraints_atoms, constraints_dist,
+                 constraints_angle, constraints_dihedral,
+                 complex_type, geom, sample, original_smi) = job_input
+            else:
+                (smi, name, charge, mult,
+                 constraints_atoms, constraints_dist,
+                 constraints_angle, constraints_dihedral,
+                 complex_type, geom, sample) = job_input
+                original_smi = smi if isinstance(smi, str) else None
 
             csearch_nprocs = nprocs
             valid_template_embed = True
@@ -632,8 +639,11 @@ class csearch:
                     constraints_atoms,
                     constraints_dist,
                     constraints_angle,
-                    constraints_dihedral
+                    constraints_dihedral,
+                    original_smi
                 )
+                if mol is not None and mol.HasProp("_AQME_CANONICAL_SMILES"):
+                    smi = mol.GetProp("_AQME_CANONICAL_SMILES")
             else:
                 mol = smi
                 complex_ts = check_constraints(constraints_atoms, constraints_dist, constraints_angle, constraints_dihedral)

@@ -1474,26 +1474,22 @@ def check_version(self, program, version_line, target_version, n_split, install_
     """
     file_txt = self.args.initial_dir.joinpath(f'{program.lower()}_internal_test.txt')
     version_found = '0.0.0'
-
+    
     # Run version command
-    result = subprocess.run(
-        [program.lower(), "--version"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-    # Some programs print the version to stdout and others to stderr
-    lines = (result.stdout + "\n" + result.stderr).splitlines()
-
+    command_run_1 = [program.lower(), "--version", '>', f'{file_txt}']
+    run_command(command_run_1, f'{file_txt}', cwd=self.args.initial_dir)
+    subprocess.run(command_run_1, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
     # Parse version from output
-    for _, line in enumerate(lines):
-        if version_line in line:
-            if program.lower() == 'crest':
-                version_found = line.split()[n_split].split(',')[0]
-            else:
-                version_found = line.split()[n_split]
-            break
+    with open(file_txt, 'r') as datfile:
+        lines = datfile.readlines()
+        for _, line in enumerate(lines):
+            if version_line in line:
+                if program.lower() == 'crest':
+                    version_found = line.split()[n_split].split(',')[0]
+                else:
+                    version_found = line.split()[n_split]
+                break
     
     if os.path.exists(file_txt):
         os.remove(file_txt)

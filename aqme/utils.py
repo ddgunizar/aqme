@@ -1474,6 +1474,18 @@ def check_version(self, program, version_line, target_version, n_split, install_
     """
     file_txt = self.args.initial_dir.joinpath(f'{program.lower()}_internal_test.txt')
     version_found = '0.0.0'
+
+    result = subprocess.run(
+    [program.lower(), "--version"],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+)
+
+    self.args.log.write(
+    f"\nDEBUG {program} stdout:\n{result.stdout}\n"
+    f"DEBUG {program} stderr:\n{result.stderr}\n"
+)
     
     # Run version command
     command_run_1 = [program.lower(), "--version", '>', f'{file_txt}']

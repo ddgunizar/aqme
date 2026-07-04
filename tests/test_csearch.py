@@ -914,8 +914,8 @@ def test_csearch_methods(
         outfile.close()
     if name == 'rule_IrSP':
         # The geometry rule rejects all *_0 conformers. For molecule A, only *_2
-        # satisfies the square-planar rule, whereas for molecule B both *_1 and
-        # *_2 satisfy the rule.
+        # satisfies the square-planar rule, whereas for molecule B only *_1
+        # satisfies the square-planar rule.
         for suffix in ['A','B']:
             file_0 = str(csearch_methods_dir+"/CSEARCH/" + name + "_" + suffix + "_0_" + program + ".sdf")
             file_1 = str(csearch_methods_dir+"/CSEARCH/" + name + "_" + suffix + "_1_" + program + ".sdf")
@@ -923,10 +923,10 @@ def test_csearch_methods(
             assert not os.path.exists(file_0)
             if suffix == "A":
                 assert not os.path.exists(file_1)
+                assert os.path.exists(file_2)
             else:
                 assert os.path.exists(file_1)
-
-            assert os.path.exists(file_2)
+                assert not os.path.exists(file_2)
     else:
         assert os.path.exists(file)
     mols = rdkit.Chem.SDMolSupplier(file, removeHs=False, sanitize=False)

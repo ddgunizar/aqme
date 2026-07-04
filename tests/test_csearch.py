@@ -927,6 +927,8 @@ def test_csearch_methods(
             else:
                 assert os.path.exists(file_1)
                 assert not os.path.exists(file_2)
+        os.chdir(w_dir_main)
+        return
     else:
         assert os.path.exists(file)
     mols = rdkit.Chem.SDMolSupplier(file, removeHs=False, sanitize=False)

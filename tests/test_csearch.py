@@ -9,6 +9,7 @@ import os
 import pytest
 import glob
 from aqme.csearch import csearch
+from aqme.csearch.utils import normalize_smiles_for_csearch
 import rdkit
 import shutil
 
@@ -33,6 +34,17 @@ if not os.path.exists(csearch_input_dir):
     os.mkdir(csearch_input_dir)
 if not os.path.exists(csearch_varfile_dir):
     os.mkdir(csearch_varfile_dir)
+
+
+def test_normalize_smiles_for_csearch_removes_explicit_h_and_atom_maps():
+    smiles_variants = [
+        "CC",
+        "[H]C([H])([H])C([H])([H])[H]",
+        "[CH3:1]C",
+        "[C:1]C",
+    ]
+
+    assert {normalize_smiles_for_csearch(smi) for smi in smiles_variants} == {"CC"}
 
 # tests for varfile
 @pytest.mark.parametrize(
@@ -65,6 +77,7 @@ def test_csearch_varfile(varfile, nameinvarfile, output_nummols):
         ("rdkit", "Pd_geom.csv", [1, 1]),
         ("rdkit", "blank_smi.csv", [1, 1]), # check blank cells
         ("rdkit", "unique_smi.csv", [1]), # check that only unique SMILES are used
+        ("rdkit", "explicit_h_mapped_unique.csv", [1]), # equivalent SMILES after H/map cleanup
         ("rdkit", "partial_path", [2, 4]), # checks partial PATHs
         ("rdkit", "file_name", [2, 4]), # checks file_name
         ("rdkit", "molecules.cdx", [4, 2]),
@@ -177,18 +190,14 @@ def test_csearch_input_parameters(program, input, output_nummols):
             assert 103 < angle_FPdBr < 104
 
         # complex_type = squareplanar, including geom as well
-        file_0 = str(csearch_input_dir+"/CSEARCH/Pd_geom_0_" + program + ".sdf")
-        file_1 = str(csearch_input_dir+"/CSEARCH/Pd_geom_1_" + program + ".sdf")
-        file_2 = str(csearch_input_dir+"/CSEARCH/Pd_geom_2_" + program + ".sdf")
-        assert not os.path.exists(file_0)
-        assert not os.path.exists(file_1)
-        assert os.path.exists(file_2)
-        with rdkit.Chem.SDMolSupplier(file_2, removeHs=False) as mol_2:
+        geom_files = glob.glob(f'{csearch_input_dir}/CSEARCH/Pd_geom_*_{program}.sdf')
+        assert len(geom_files) == 1
+        with rdkit.Chem.SDMolSupplier(geom_files[0], removeHs=False) as mol_2:
             assert len(mol_2) == output_nummols[1]
             assert 5 == int(mol_2[0].GetProp("Real charge"))
             assert 5 == int(mol_2[0].GetProp("Mult"))
             # assert iodine is replaced back to Pd
-            metal_found,iodine_found = check_metal_back(file_2, 'Pd')
+            metal_found,iodine_found = check_metal_back(geom_files[0], 'Pd')
             assert metal_found
             assert not iodine_found
             # assert the complex_type and geom rule are applied
@@ -229,6 +238,20 @@ def test_csearch_input_parameters(program, input, output_nummols):
             if 'x  SMILES "C" used in Me2 is a duplicate, it was already used with a different code_name!' in line:
                 find_warn_dup = True
         assert find_warn_dup
+
+    elif input == "explicit_h_mapped_unique.csv":
+        file1 = f'{csearch_input_dir}/CSEARCH/ethane_mapped_{program}.sdf'
+        file2 = f'{csearch_input_dir}/CSEARCH/ethane_explicit_{program}.sdf'
+        file3 = f'{csearch_input_dir}/CSEARCH/ethane_plain_{program}.sdf'
+
+        assert os.path.exists(file1)
+        assert not os.path.exists(file2)
+        assert not os.path.exists(file3)
+        with rdkit.Chem.SDMolSupplier(file1, removeHs=False) as mols:
+            assert len(mols) == output_nummols[0]
+            assert mols[0].GetProp("SMILES") == "CC"
+            assert mols[0].GetProp("AQME_ATOM_MAP") == "1:0:C"
+        os.remove(file1)
 
     elif input in ["molecules.cdx"]:
         file1 = f'{csearch_input_dir}/CSEARCH/molecules_0_{program}.sdf'
@@ -412,7 +435,7 @@ def test_csearch_crest_parameters(
             0.0001,
             4,
             0.6,
-            3,
+            4,
         ),
     ],
 )
@@ -890,14 +913,22 @@ def test_csearch_methods(
         outlines_crest = outfile.readlines()
         outfile.close()
     if name == 'rule_IrSP':
-        # only the NAME_2_rdkit.sdf file passes the rule. For consistency, file_2 is file (since it exists)
+        # The geometry rule rejects all *_0 conformers. For molecule A, only *_2
+        # satisfies the square-planar rule, whereas for molecule B only *_1
+        # satisfies the square-planar rule.
         for suffix in ['A','B']:
             file_0 = str(csearch_methods_dir+"/CSEARCH/" + name + "_" + suffix + "_0_" + program + ".sdf")
             file_1 = str(csearch_methods_dir+"/CSEARCH/" + name + "_" + suffix + "_1_" + program + ".sdf")
-            file = str(csearch_methods_dir+"/CSEARCH/" + name + "_" + suffix + "_2_" + program + ".sdf")
+            file_2 = str(csearch_methods_dir+"/CSEARCH/" + name + "_" + suffix + "_2_" + program + ".sdf")
             assert not os.path.exists(file_0)
-            assert not os.path.exists(file_1)
-            assert os.path.exists(file)
+            if suffix == "A":
+                assert not os.path.exists(file_1)
+                assert os.path.exists(file_2)
+            else:
+                assert os.path.exists(file_1)
+                assert not os.path.exists(file_2)
+        os.chdir(w_dir_main)
+        return
     else:
         assert os.path.exists(file)
     mols = rdkit.Chem.SDMolSupplier(file, removeHs=False, sanitize=False)

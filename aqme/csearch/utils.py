@@ -322,7 +322,7 @@ def prepare_csv_files(args, csearch_file):
 
     # Process SMILES columns and generate job configurations
     job_inputs = []
-    unique_smiles = set()
+    unique_mol_configs = set()
     has_smiles_column = False
     
     for col_idx, column in enumerate(csv_smiles.columns):
@@ -335,15 +335,19 @@ def prepare_csv_files(args, csearch_file):
                 
                 if mol_config is not None:
                     smiles, name = mol_config[0], mol_config[1]
+                    dedup_key = _dedup_key_from_mol_config(mol_config)
                     
-                    # Only add unique SMILES
-                    if smiles not in unique_smiles:
+                    # Only add unique generation jobs. Different charge,
+                    # multiplicity, constraints, template settings or sample
+                    # values must produce independent conformer jobs.
+                    if dedup_key not in unique_mol_configs:
                         job_inputs.append(mol_config)
-                        unique_smiles.add(smiles)
+                        unique_mol_configs.add(dedup_key)
                     else:
                         args.log.write(
                             f'\nx  SMILES "{smiles}" used in {name} is a duplicate, '
-                            'it was already used with a different code_name!'
+                            'it was already used with a different code_name and '
+                            'the same conformer-generation settings!'
                         )
                        
     if not has_smiles_column:
@@ -355,6 +359,22 @@ def prepare_csv_files(args, csearch_file):
         sys.exit()
         
     return job_inputs
+
+
+def _stable_csearch_setting(value):
+    """Return a stable representation for settings that affect conformer generation."""
+    if isinstance(value, list):
+        return tuple(_stable_csearch_setting(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_stable_csearch_setting(item) for item in value)
+    return str(value)
+
+
+def _dedup_key_from_mol_config(mol_config):
+    """Build a deduplication key that keeps different generation settings separate."""
+    return (mol_config[0],) + tuple(
+        _stable_csearch_setting(value) for value in mol_config[2:11]
+    )
 
 
 def generate_mol_from_csv(args, csv_smiles, index, column_index):

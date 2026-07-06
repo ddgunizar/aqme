@@ -2462,27 +2462,33 @@ def validate_atom_mapping_consistency(
     # Collect in set() observed symbols for each mapping number
     # If inconsistencies arise later, the set will have more than one symbol for that mapping number
     global_mapping = {num: set() for num in mapping_numbers}
+    canonical_positions = {num: {} for num in mapping_numbers}
 
     for file in files:
         atom_map_text = get_sdf_atom_map(file)
+        canonical_smiles = get_sdf_property(file, "SMILES")
 
         # CSEARCH stores map_number:canonical_atom_index:symbol metadata so
         # conformer generation can use canonical unmapped SMILES while QDESCP
         # still validates mapped atom requests against the same atom order.
         if atom_map_text:
             local_map = {num: set() for num in mapping_numbers}
+            local_positions = {num: set() for num in mapping_numbers}
             for entry in str(atom_map_text).split(";"):
                 parts = entry.split(":")
                 if len(parts) < 3:
                     continue
                 try:
                     map_num = int(parts[0])
+                    atom_idx = int(parts[1])
                 except ValueError:
                     continue
                 if map_num in mapping_numbers:
                     local_map[map_num].add(parts[2])
+                    local_positions[map_num].add(atom_idx)
         else:
             local_map = None
+            local_positions = None
 
         smi = extract_smiles_fn(file)
         if smi is None and local_map is None:
@@ -2508,11 +2514,13 @@ def validate_atom_mapping_consistency(
             # Extract mapping numbers and their corresponding symbols in this molecule.
             # We use a set to detect duplicated mapping numbers within the same molecule.
             local_map = {num: set() for num in mapping_numbers}
+            local_positions = {num: set() for num in mapping_numbers}
 
             for atom in mol.GetAtoms():
                 map_num = atom.GetAtomMapNum()
                 if map_num in mapping_numbers:
                     local_map[map_num].add(atom.GetSymbol())
+                    local_positions[map_num].add(atom.GetIdx())
 
         # Ensure requested mappings exist in this molecule
         for num in mapping_numbers:
@@ -2527,6 +2535,14 @@ def validate_atom_mapping_consistency(
 
             # Mapping appears more than once in the same molecule
             # (e.g. [C:2](=[O:2])) which is chemically inconsistent
+            if len(local_positions[num]) > 1:
+                logger.write(
+                    f'\nx  WARNING! Atom mapping {num} appears multiple times '
+                    f'in "{file}". Each mapping number must correspond to a '
+                    "single atom."
+                )
+                return False
+
             if len(local_map[num]) > 1:
                 logger.write(
                     f'\nx  WARNING! Atom mapping {num} appears multiple times '
@@ -2540,6 +2556,10 @@ def validate_atom_mapping_consistency(
             # If more than one symbol appears later, inconsistency is detected.
             symbol = next(iter(local_map[num]))
             global_mapping[num].add(symbol)
+            if canonical_smiles is not None:
+                canonical_positions[num].setdefault(canonical_smiles, set()).update(
+                    local_positions[num]
+                )
 
     # Ensure consistency across all molecules
     for num, symbols in global_mapping.items():
@@ -2551,5 +2571,18 @@ def validate_atom_mapping_consistency(
                 "in all molecules."
             )
             return False
+
+    for num, smiles_positions in canonical_positions.items():
+        for canonical_smiles, positions in smiles_positions.items():
+            if len(positions) > 1:
+                logger.write(
+                    f"\nx  WARNING! Atom mapping {num} points to different "
+                    f"canonical atom indexes {sorted(positions)} in duplicate "
+                    f"entries of the same molecule ({canonical_smiles}). "
+                    f"Descriptors named Atom_{num}_... will be generated for "
+                    "the mapped atom of each row, but these columns should be "
+                    "interpreted as row-specific atom descriptors, not as the "
+                    "same chemical position across rows."
+                )
 
     return True

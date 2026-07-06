@@ -78,6 +78,7 @@ def test_csearch_varfile(varfile, nameinvarfile, output_nummols):
         ("rdkit", "blank_smi.csv", [1, 1]), # check blank cells
         ("rdkit", "unique_smi.csv", [1]), # check that only unique SMILES are used
         ("rdkit", "explicit_h_mapped_unique.csv", [1]), # equivalent SMILES after H/map cleanup
+        ("rdkit", "duplicate_diff_charge.csv", [1, 1]), # same SMILES with different generation settings
         ("rdkit", "partial_path", [2, 4]), # checks partial PATHs
         ("rdkit", "file_name", [2, 4]), # checks file_name
         ("rdkit", "molecules.cdx", [4, 2]),
@@ -235,7 +236,7 @@ def test_csearch_input_parameters(program, input, output_nummols):
 
         find_warn_dup = False
         for line in outlines_dat:
-            if 'x  SMILES "C" used in Me2 is a duplicate, it was already used with a different code_name!' in line:
+            if 'x  SMILES "C" used in Me2 is a duplicate, it was already used with a different code_name and the same conformer-generation settings!' in line:
                 find_warn_dup = True
         assert find_warn_dup
 
@@ -252,6 +253,21 @@ def test_csearch_input_parameters(program, input, output_nummols):
             assert mols[0].GetProp("SMILES") == "CC"
             assert mols[0].GetProp("AQME_ATOM_MAP") == "1:0:C"
         os.remove(file1)
+
+    elif input == "duplicate_diff_charge.csv":
+        file1 = f'{csearch_input_dir}/CSEARCH/Me_neutral_{program}.sdf'
+        file2 = f'{csearch_input_dir}/CSEARCH/Me_cation_{program}.sdf'
+
+        assert os.path.exists(file1)
+        assert os.path.exists(file2)
+        with rdkit.Chem.SDMolSupplier(file1, removeHs=False) as mols:
+            assert len(mols) == output_nummols[0]
+            assert 0 == int(mols[0].GetProp("Real charge"))
+        with rdkit.Chem.SDMolSupplier(file2, removeHs=False) as mols:
+            assert len(mols) == output_nummols[1]
+            assert 1 == int(mols[0].GetProp("Real charge"))
+        os.remove(file1)
+        os.remove(file2)
 
     elif input in ["molecules.cdx"]:
         file1 = f'{csearch_input_dir}/CSEARCH/molecules_0_{program}.sdf'
